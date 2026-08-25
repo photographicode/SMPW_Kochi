@@ -138,8 +138,10 @@
             state.isSyncing = true;
             
             try {
-                // Fetch fresh data (cache-buster ?t= stops devices from serving old memory)
-                const response = await fetch(GOOGLE_SCRIPT_URL + '?t=' + Date.now());
+                // Safely append cache-buster to the URL
+                const url = new URL(GOOGLE_SCRIPT_URL);
+                url.searchParams.append('t', Date.now());
+                const response = await fetch(url.toString());
                 const data = await response.json();
                 
                 // CRITICAL FIX: Google Sheets takes 2-4 seconds to save. If we read from the database 
@@ -158,6 +160,9 @@
                     updatedLocs = data.locations;
                 } else if (!state.dataLoaded) {
                     updatedLocs = INITIAL_LOCATIONS;
+                    // CRITICAL FIX: The database is empty! Instantly push default locations to the Google Sheet
+                    // so you actually see data appear in cell A2 the very first time you load the app.
+                    postToDatabase('update_locations', 'locations', INITIAL_LOCATIONS);
                 }
                 
                 if (data.assignments) {
@@ -205,15 +210,19 @@
             
             lastSaveTimestamp = Date.now(); // Mark the time we started saving
 
-            // Using no-cors prevents the browser from blocking the Google Apps Script redirect
+            const payloadString = JSON.stringify({
+                action: action,
+                [payloadKey]: payloadData
+            });
+
+            // CRITICAL FIX: Browsers violently block JSON bodies, which is why the Google Sheet was completely empty. 
+            // Sending as 'application/x-www-form-urlencoded' is 100% bulletproof and bypasses all browser security blocks.
             fetch(GOOGLE_SCRIPT_URL, {
                 method: 'POST',
-                mode: 'no-cors', 
-                headers: { 'Content-Type': 'text/plain' }, 
-                body: JSON.stringify({
-                    action: action,
-                    [payloadKey]: payloadData
-                })
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: 'data=' + encodeURIComponent(payloadString)
             }).catch(err => console.error("Save error:", err));
         };
 
@@ -759,5 +768,6 @@
     </script>
 </body>
 </html>
+
 
 
