@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SMPW Kochi Scheduler</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- FontAwesome for Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        .hide-scrollbar::-webkit-scrollbar { display: none; }
+        .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        .fade-in { animation: fadeIn 0.2s ease-in-out; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950/40 text-slate-200 font-sans selection:bg-indigo-500/30 antialiased">
+
+    <div id="app-root">
+        <!-- App will be rendered here -->
+        <div class="min-h-screen flex flex-col items-center justify-center text-slate-400 gap-4">
+            <div class="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+            Loading Schedule...
+        </div>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Firebase Initialization ---
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'smpw-kochi-app';
+
+        // --- Default Configurations ---
+        const INITIAL_LOCATIONS = [
+            { 
+                id: 'loc_1', 
+                name: 'City Square Plaza', 
+                mapUrl: 'https://maps.google.com/?q=City+Square+Plaza+Kochi',
+                phone: '9876543210',
+                shifts: [
+                    { id: 'sh_1', label: '08:00 AM - 10:00 AM', slotsCount: 2, backupCount: 1 },
+                    { id: 'sh_2', label: '10:00 AM - 12:00 PM', slotsCount: 2, backupCount: 1 }
+                ]
+            },
+            { 
+                id: 'loc_2', 
+                name: 'Central Station Entrance', 
+                mapUrl: 'https://maps.google.com/?q=Central+Station+Kochi',
+                phone: '9876543211',
+                shifts: [
+                    { id: 'sh_3', label: '03:00 PM - 05:00 PM', slotsCount: 3, backupCount: 2 }
+                ]
+            }
+        ];
+
+        // --- App State ---
+        const state = {
+            user: null,
+            dataLoaded: false,
+            locations: [],
+            assignments: {},
+            availableDates: [],
+            selectedDate: null,
+            isAdmin: false,
+            showAdminLogin: false,
+            loginError: false,
+            editingLocationId: null
+        };
+
+        // --- Helper Functions ---
+        const generateNext30Days = () => {
+            const dates = [];
+            const today = new Date();
+            for (let i = 0; i < 30; i++) {
+                const nextDate = new Date(today);
+                nextDate.setDate(today.getDate() + i);
+                dates.push(nextDate);
+            }
+            return dates;
+        };
+
+        const formatDateKey = (date) => date.toISOString().split('T')[0];
+        const formatDisplayDate = (date) => date.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+        const formatShortDate = (date) => date.toLocaleDateString('en-US', { weekday: 'short' });
+        const formatMonth = (date) => date.toLocaleDateString('en-US', { month: 'short' });
+
+        const getShiftCountForDate = (dateKey) => {
+            const dayData = state.assignments[dateKey];
+            if (!dayData) return 0;
+            let count = 0;
+            Object.values(dayData).forEach(loc => {
+                Object.values(loc).forEach(shift => {
+                    if (shift.regular) count += Object.keys(shift.regular).length;
+                    if (shift.backup) count += Object.keys(shift.backup).length;
+                });
+            });
+            return count;
+        };
+
+        // --- Initialization ---
+        state.availableDates = generateNext30Days();
+        state.selectedDate = state.availableDates[0];
+
+        const initAuth = async () => {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Auth Error", error);
+            }
+        };
+
+        initAuth();
+
+        onAuthStateChanged(auth, (user) => {
+            state.user = user;
+            if (user) {
+                setupRealtimeListeners();
+            }
+        });
+
+        const setupRealtimeListeners = () => {
+            const configRef = doc(db, 'artifacts', appId, 'public', 'data', 'smpw_config', 'main');
+            const assignRef = doc(db, 'artifacts', appId, 'public', 'data', 'smpw_assigns', 'main');
+
+            let configLoaded = false;
+            let assignLoaded = false;
+            const checkLoaded = () => { 
+                if (configLoaded && assignLoaded) {
+                    state.dataLoaded = true;
+                    renderApp();
+                }
+            };
+
+            onSnapshot(configRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    state.locations = docSnap.data().locations || [];
+                } else {
+                    setDoc(configRef, { locations: INITIAL_LOCATIONS });
+                    state.locations = INITIAL_LOCATIONS;
+                }
+                configLoaded = true;
+                checkLoaded();
+            }, (err) => console.error(err));
+
+            onSnapshot(assignRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    state.assignments = docSnap.data().assignments || {};
+                } else {
+                    state.assignments = {};
+                }
+                assignLoaded = true;
+                checkLoaded();
+            }, (err) => console.error(err));
+        };
+
+        // --- Global Actions (Attached to Window for HTML event handlers) ---
+        
+        window.selectDate = (isoString) => {
+            state.selectedDate = new Date(isoString);
+            renderApp();
+        };
+
+        window.toggleAdminModal = (show) => {
+            state.showAdminLogin = show;
+            state.loginError = false;
+            renderApp();
+        };
+
+        window.handleAdminAuth = (e) => {
+            e.preventDefault();
+            const pwd = document.getElementById('admin_pwd').value;
+            if (pwd === 'admin123') {
+                state.isAdmin = true;
+                state.showAdminLogin = false;
+                state.loginError = false;
+            } else {
+                state.loginError = true;
+            }
+            renderApp();
+        };
+
+        window.logoutAdmin = () => {
+            state.isAdmin = false;
+            state.editingLocationId = null;
+            renderApp();
+        };
+
+        // Slots
+        window.saveSlot = (dateKey, locId, shiftId, slotType, slotIndex) => {
+            const inputEl = document.getElementById(`input_${locId}_${shiftId}_${slotType}_${slotIndex}`);
+            const userName = inputEl.value.trim();
+            if (!userName) return;
+
+            const next = JSON.parse(JSON.stringify(state.assignments));
+            if (!next[dateKey]) next[dateKey] = {};
+            if (!next[dateKey][locId]) next[dateKey][locId] = {};
+            if (!next[dateKey][locId][shiftId]) next[dateKey][locId][shiftId] = { regular: {}, backup: {} };
+            if (!next[dateKey][locId][shiftId][slotType]) next[dateKey][locId][shiftId][slotType] = {};
+            next[dateKey][locId][shiftId][slotType][slotIndex] = userName;
+            
+            updateAssignments(next);
+        };
+
+        window.clearSlot = (dateKey, locId, shiftId, slotType, slotIndex) => {
+            if (!state.isAdmin) return;
+            const next = JSON.parse(JSON.stringify(state.assignments));
+            if (next[dateKey]?.[locId]?.[shiftId]?.[slotType]) {
+                delete next[dateKey][locId][shiftId][slotType][slotIndex];
+                updateAssignments(next);
+            }
+        };
+
+        const updateAssignments = async (newAssigns) => {
+            state.assignments = newAssigns;
+            renderApp(); // Optimistic update
+            if (state.user) {
+                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'smpw_assigns', 'main'), { assignments: newAssigns });
+            }
+        };
+
+        const updateLocations = async (newLocs) => {
+            state.locations = newLocs;
+            renderApp(); // Optimistic update
+            if (state.user) {
+                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'smpw_config', 'main'), { locations: newLocs });
+            }
+        };
+
+        // Location Admin Functions
+        window.addLocation = (e) => {
+            e.preventDefault();
+            const name = document.getElementById('new_loc_name').value.trim();
+            const mapUrl = document.getElementById('new_loc_map').value.trim();
+            const phone = document.getElementById('new_loc_phone').value.trim();
+            if (!name) return;
+
+            const newLoc = { id: crypto.randomUUID(), name, mapUrl, phone, shifts: [] };
+            updateLocations([...state.locations, newLoc]);
+        };
+
+        window.deleteLocation = (id) => {
+            if (confirm('Are you sure you want to delete this entire location?')) {
+                updateLocations(state.locations.filter(loc => loc.id !== id));
+            }
+        };
+
+        window.setEditingLocation = (id) => {
+            state.editingLocationId = id;
+            renderApp();
+        };
+
+        window.saveEditLocation = (id) => {
+            const name = document.getElementById(`edit_name_${id}`).value.trim();
+            const mapUrl = document.getElementById(`edit_map_${id}`).value.trim();
+            const phone = document.getElementById(`edit_phone_${id}`).value.trim();
+            
+            if (!name) return;
+            updateLocations(state.locations.map(loc => loc.id === id ? { ...loc, name, mapUrl, phone } : loc));
+            state.editingLocationId = null;
+            renderApp();
+        };
+
+        // Shift Admin Functions
+        window.addShift = (locId) => {
+            const labelEl = document.getElementById(`new_shift_${locId}`);
+            const label = labelEl.value.trim();
+            if (!label) return;
+            
+            updateLocations(state.locations.map(loc => {
+                if (loc.id === locId) {
+                    return {
+                        ...loc,
+                        shifts: [...(loc.shifts || []), { id: crypto.randomUUID(), label, slotsCount: 2, backupCount: 1 }]
+                    };
+                }
+                return loc;
+            }));
+        };
+
+        window.updateShiftSlots = (locId, shiftId, type, change) => {
+            updateLocations(state.locations.map(loc => {
+                if (loc.id === locId) {
+                    return {
+                        ...loc,
+                        shifts: loc.shifts.map(shift => {
+                            if (shift.id === shiftId) {
+                                const newCount = Math.max(0, (shift[type] || 0) + change); 
+                                return { ...shift, [type]: newCount };
+                            }
+                            return shift;
+                        })
+                    };
+                }
+                return loc;
+            }));
+        };
+
+        window.deleteShift = (locId, shiftId) => {
+            if (confirm('Delete this time shift?')) {
+                updateLocations(state.locations.map(loc => {
+                    if (loc.id === locId) return { ...loc, shifts: loc.shifts.filter(s => s.id !== shiftId) };
+                    return loc;
+                }));
+            }
+        };
+
+
+        // --- Render Engine ---
+        const renderApp = () => {
+            const root = document.getElementById('app-root');
+            if (!state.dataLoaded || !state.selectedDate) return;
+
+            const activeDateKey = formatDateKey(state.selectedDate);
+            const activeDayCount = getShiftCountForDate(activeDateKey);
+
+            let html = `
+                <div class="min-h-screen">
+                    <!-- Header -->
+                    <header class="sticky top-0 z-30 bg-slate-950/80 backdrop-blur-xl border-b border-white/10 shadow-lg">
+                        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 sm:py-4 flex justify-between items-center">
+                            <div class="flex items-center gap-2 sm:gap-3">
+                                <div class="bg-indigo-600 p-1.5 sm:p-2 rounded-xl shadow-lg shadow-indigo-600/20 text-white">
+                                    <i class="fa-solid fa-calendar text-lg sm:text-xl"></i>
+                                </div>
+                                <h1 class="text-lg sm:text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-indigo-200 tracking-tight">
+                                    SMPW Kochi
+                                </h1>
+                            </div>
+                            
+                            <button onclick="${state.isAdmin ? 'logoutAdmin()' : 'toggleAdminModal(true)'}"
+                                class="flex items-center gap-1.5 sm:gap-2 px-3 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all shadow-sm border ${
+                                state.isAdmin 
+                                    ? 'bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border-emerald-500/30' 
+                                    : 'bg-slate-800/80 hover:bg-slate-700 border-white/5 text-slate-400'
+                            }">
+                                <i class="fa-solid ${state.isAdmin ? 'fa-lock-open' : 'fa-lock'}"></i>
+                                <span class="hidden sm:inline">${state.isAdmin ? "Admin Active" : "Admin Login"}</span>
+                            </button>
+                        </div>
+                    </header>
+
+                    <main class="max-w-7xl mx-auto px-2 sm:px-6 lg:px-8 py-4 sm:py-6 pb-12">
+                        
+                        <!-- Date Selector -->
+                        <div class="mb-6">
+                            <div class="flex overflow-x-auto hide-scrollbar gap-2 sm:gap-3 pb-3 scroll-smooth">
+                                ${state.availableDates.map(date => {
+                                    const dateKey = formatDateKey(date);
+                                    const isSelected = dateKey === activeDateKey;
+                                    const shiftCount = getShiftCountForDate(dateKey);
+                                    const isToday = dateKey === formatDateKey(new Date());
+
+                                    return `
+                                        <button onclick="selectDate('${date.toISOString()}')"
+                                            class="flex-shrink-0 flex flex-col items-center justify-center w-16 sm:w-20 h-20 sm:h-24 rounded-2xl transition-all duration-300 border ${
+                                            isSelected 
+                                                ? 'border-indigo-500 bg-indigo-600 shadow-lg shadow-indigo-900/40 text-white transform scale-105' 
+                                                : 'border-white/10 bg-slate-900/50 hover:bg-slate-800 text-slate-400 backdrop-blur-sm'
+                                        }">
+                                            <span class="text-[10px] sm:text-[11px] font-bold tracking-wider uppercase ${isSelected ? 'text-indigo-200' : 'text-slate-500'}">
+                                                ${isToday ? 'Today' : formatShortDate(date)}
+                                            </span>
+                                            <span class="text-xl sm:text-2xl font-bold my-0.5 sm:my-1 ${isSelected ? 'text-white' : 'text-slate-200'}">
+                                                ${date.getDate()}
+                                            </span>
+                                            <span class="text-[10px] sm:text-[11px] font-medium ${isSelected ? 'text-indigo-200' : 'text-slate-500'}">
+                                                ${formatMonth(date)}
+                                            </span>
+                                            <div class="h-1.5 w-full flex justify-center mt-1 gap-0.5">
+                                                ${shiftCount > 0 ? `<div class="w-1 h-1 sm:w-1.5 sm:h-1.5 rounded-full ${isSelected ? 'bg-white' : 'bg-indigo-500 shadow-[0_0_8px_rgba(99,102,241,0.8)]'}"></div>` : ''}
+                                            </div>
+                                        </button>
+                                    `;
+                                }).join('')}
+                            </div>
+                        </div>
+
+                        <!-- Selected Date Title -->
+                        <div class="flex flex-col mb-4 sm:mb-6 mt-2 border-b border-white/10 pb-3 sm:pb-4 px-2 sm:px-0">
+                            <h2 class="text-xl sm:text-3xl font-bold text-white tracking-tight">
+                                ${formatDisplayDate(state.selectedDate)}
+                            </h2>
+                            <p class="text-indigo-300/80 mt-1 text-xs sm:text-sm flex items-center gap-1.5 sm:gap-2">
+                                <span class="w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full bg-indigo-500 animate-pulse"></span>
+                                ${activeDayCount} registrations today
+                            </p>
+                        </div>
+
+                        <!-- Locations Grid -->
+                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
+                            ${state.locations.map(location => {
+                                const isEditingLoc = state.isAdmin && state.editingLocationId === location.id;
+                                
+                                // Generate Location HTML
+                                let locHtml = `
+                                    <div class="bg-slate-900/60 backdrop-blur-md border border-white/10 rounded-2xl sm:rounded-3xl overflow-hidden flex flex-col shadow-xl">
+                                `;
+
+                                // Location Header
+                                if (isEditingLoc) {
+                                    locHtml += `
+                                        <div class="p-4 sm:p-5 border-b border-white/5 bg-slate-800/80 flex flex-col gap-3">
+                                            <input id="edit_name_${location.id}" value="${location.name}" placeholder="Location Name" class="w-full bg-slate-950 border border-white/10 text-white rounded-xl px-3 py-2 text-sm focus:ring-1 focus:ring-indigo-500" />
+                                            <input id="edit_map_${location.id}" value="${location.mapUrl || ''}" placeholder="Google Maps URL" class="w-full bg-slate-950 border border-white/10 text-white rounded-xl px-3 py-2 text-sm focus:ring-1 focus:ring-indigo-500" />
+                                            <input id="edit_phone_${location.id}" value="${location.phone || ''}" placeholder="Contact Phone Number" class="w-full bg-slate-950 border border-white/10 text-white rounded-xl px-3 py-2 text-sm focus:ring-1 focus:ring-indigo-500" />
+                                            <div class="flex gap-2 justify-end mt-1">
+                                                <button onclick="setEditingLocation(null)" class="px-4 py-2 bg-slate-700 text-white rounded-lg text-sm font-medium">Cancel</button>
+                                                <button onclick="saveEditLocation('${location.id}')" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-medium flex items-center gap-1"><i class="fa-solid fa-floppy-disk"></i> Save</button>
+                                            </div>
+                                        </div>
+                                    `;
+                                } else {
+                                    locHtml += `
+                                        <div class="p-4 sm:p-5 border-b border-white/5 bg-slate-800/40 flex justify-between items-start">
+                                            <div>
+                                                <h3 class="text-lg sm:text-xl font-bold text-white mb-2 flex items-center gap-2">
+                                                    <i class="fa-solid fa-location-dot text-indigo-400"></i>
+                                                    <span class="break-words">${location.name}</span>
+                                                </h3>
+                                                <div class="flex flex-wrap items-center gap-2 sm:gap-4 mt-1">
+                                                    ${location.mapUrl ? `
+                                                    <a href="${location.mapUrl}" target="_blank" rel="noopener noreferrer" class="bg-slate-900/80 hover:bg-slate-800 text-xs sm:text-sm text-indigo-300 hover:text-indigo-200 px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors border border-white/5 shadow-sm">
+                                                        <i class="fa-solid fa-map"></i> Map
+                                                    </a>` : ''}
+                                                    ${location.phone ? `
+                                                    <a href="tel:${location.phone}" class="bg-slate-900/80 hover:bg-slate-800 text-xs sm:text-sm text-emerald-400 hover:text-emerald-300 px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors border border-white/5 shadow-sm">
+                                                        <i class="fa-solid fa-phone"></i> Call
+                                                    </a>` : ''}
+                                                </div>
+                                            </div>
+                                            ${state.isAdmin ? `
+                                                <div class="flex gap-1.5">
+                                                    <button onclick="setEditingLocation('${location.id}')" class="p-2 bg-slate-800 hover:bg-indigo-500/20 text-slate-400 hover:text-indigo-400 rounded-lg transition-colors border border-white/5"><i class="fa-solid fa-pen-to-square"></i></button>
+                                                    <button onclick="deleteLocation('${location.id}')" class="p-2 bg-slate-800 hover:bg-red-500/20 text-slate-400 hover:text-red-400 rounded-lg transition-colors border border-white/5"><i class="fa-solid fa-trash-can"></i></button>
+                                                </div>
+                                            ` : ''}
+                                        </div>
+                                    `;
+                                }
+
+                                // Admin Add Shift
+                                if (state.isAdmin && !isEditingLoc) {
+                                    locHtml += `
+                                        <div class="bg-slate-950/40 p-3 sm:p-4 border-b border-white/5 flex gap-2">
+                                            <input id="new_shift_${location.id}" placeholder="New timing (e.g. 08:00 AM - 10:00 AM)" class="flex-1 bg-slate-900 border border-white/10 text-white rounded-xl px-3 py-2 text-xs sm:text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500" />
+                                            <button onclick="addShift('${location.id}')" class="bg-emerald-600 hover:bg-emerald-500 text-white px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold shadow-md"><i class="fa-solid fa-plus"></i></button>
+                                        </div>
+                                    `;
+                                }
+
+                                // Shifts List
+                                locHtml += `<div class="p-3 sm:p-5 flex-1 flex flex-col gap-4 sm:gap-6">`;
+                                
+                                if (!location.shifts || location.shifts.length === 0) {
+                                    locHtml += `<p class="text-slate-500 text-xs sm:text-sm italic py-4 text-center border border-dashed border-slate-700 rounded-xl">No shifts active.</p>`;
+                                } else {
+                                    location.shifts.forEach(shift => {
+                                        locHtml += `<div class="bg-slate-950/40 border border-white/5 rounded-xl sm:rounded-2xl p-3 sm:p-5 shadow-inner">`;
+                                        
+                                        // Shift Header & Admin
+                                        locHtml += `
+                                            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 pb-3 border-b border-white/5">
+                                                <div class="text-indigo-300 font-bold text-sm sm:text-[15px] flex items-center gap-2">
+                                                    <i class="fa-solid fa-clock text-indigo-400"></i> ${shift.label}
+                                                </div>
+                                                ${state.isAdmin ? `
+                                                    <div class="flex flex-wrap items-center gap-2 sm:gap-4 bg-slate-900/80 p-1.5 sm:p-2 rounded-xl border border-white/5">
+                                                        <div class="flex items-center gap-1.5 bg-slate-800/80 px-2 py-1 rounded-lg">
+                                                            <span class="text-[10px] text-slate-400 uppercase tracking-wider font-bold mr-1">Reg:</span>
+                                                            <button onclick="updateShiftSlots('${location.id}', '${shift.id}', 'slotsCount', -1)" class="p-1 text-slate-400 hover:text-white bg-slate-700 rounded"><i class="fa-solid fa-minus text-[10px]"></i></button>
+                                                            <span class="text-white text-xs font-bold w-3 text-center">${shift.slotsCount || 0}</span>
+                                                            <button onclick="updateShiftSlots('${location.id}', '${shift.id}', 'slotsCount', 1)" class="p-1 text-slate-400 hover:text-white bg-slate-700 rounded"><i class="fa-solid fa-plus text-[10px]"></i></button>
+                                                        </div>
+                                                        <div class="flex items-center gap-1.5 bg-slate-800/80 px-2 py-1 rounded-lg border border-amber-500/20">
+                                                            <span class="text-[10px] text-amber-500/70 uppercase tracking-wider font-bold mr-1">Bak:</span>
+                                                            <button onclick="updateShiftSlots('${location.id}', '${shift.id}', 'backupCount', -1)" class="p-1 text-amber-500 hover:text-amber-300 bg-slate-700 rounded"><i class="fa-solid fa-minus text-[10px]"></i></button>
+                                                            <span class="text-amber-400 text-xs font-bold w-3 text-center">${shift.backupCount || 0}</span>
+                                                            <button onclick="updateShiftSlots('${location.id}', '${shift.id}', 'backupCount', 1)" class="p-1 text-amber-500 hover:text-amber-300 bg-slate-700 rounded"><i class="fa-solid fa-plus text-[10px]"></i></button>
+                                                        </div>
+                                                        <button onclick="deleteShift('${location.id}', '${shift.id}')" class="p-1.5 ml-auto sm:ml-0 text-slate-500 hover:text-red-400 bg-slate-800 rounded-lg transition-colors"><i class="fa-solid fa-trash-can"></i></button>
+                                                    </div>
+                                                ` : ''}
+                                            </div>
+                                        `;
+
+                                        // Regular Slots
+                                        if (shift.slotsCount > 0) {
+                                            locHtml += `<div class="space-y-2 sm:space-y-3 mb-4 sm:mb-5">`;
+                                            for(let i=0; i<shift.slotsCount; i++) {
+                                                const assignedName = state.assignments[activeDateKey]?.[location.id]?.[shift.id]?.regular?.[i];
+                                                if (assignedName) {
+                                                    locHtml += `
+                                                        <div class="flex items-center justify-between bg-indigo-500/10 border border-indigo-500/20 rounded-xl px-3 sm:px-4 py-2.5 sm:py-3 fade-in">
+                                                            <div class="flex items-center gap-2 sm:gap-3">
+                                                                <div class="w-5 h-5 sm:w-6 sm:h-6 rounded-full bg-indigo-500/20 text-indigo-300 flex items-center justify-center">
+                                                                    <i class="fa-solid fa-users text-xs"></i>
+                                                                </div>
+                                                                <span class="font-semibold text-indigo-100 text-sm">${assignedName}</span>
+                                                            </div>
+                                                            ${state.isAdmin ? `
+                                                                <button onclick="clearSlot('${activeDateKey}', '${location.id}', '${shift.id}', 'regular', ${i})" class="text-slate-500 hover:text-red-400 bg-slate-900/50 hover:bg-slate-800 p-1.5 rounded-lg transition-colors" title="Remove Name">
+                                                                    <i class="fa-solid fa-trash-can"></i>
+                                                                </button>
+                                                            ` : ''}
+                                                        </div>
+                                                    `;
+                                                } else {
+                                                    // Input Form
+                                                    locHtml += `
+                                                        <div class="flex gap-2 items-center w-full fade-in">
+                                                            <div class="relative flex-1">
+                                                                <input id="input_${location.id}_${shift.id}_regular_${i}" type="text" placeholder="Your name..."
+                                                                    class="w-full bg-slate-950/50 border border-indigo-500/30 text-white rounded-xl pl-3 sm:pl-4 pr-8 py-2 sm:py-2.5 text-xs sm:text-sm focus:outline-none focus:ring-1 focus:border-indigo-500 focus:ring-indigo-500/50 placeholder-slate-500 transition-all shadow-inner" />
+                                                                <div class="absolute right-3 top-1/2 -translate-y-1/2 text-indigo-500/70">
+                                                                    <i class="fa-solid fa-users text-xs"></i>
+                                                                </div>
+                                                            </div>
+                                                            <button onclick="saveSlot('${activeDateKey}', '${location.id}', '${shift.id}', 'regular', ${i})"
+                                                                class="bg-indigo-600 hover:bg-indigo-500 text-white p-2 sm:p-2.5 rounded-xl transition-all shadow-md active:scale-95 flex-shrink-0">
+                                                                <i class="fa-solid fa-check"></i>
+                                                            </button>
+                                                        </div>
+                                                    `;
+                                                }
+                                            }
+                                            locHtml += `</div>`;
+                                        }
+
+                                        // Backup Slots
+                                        if (shift.backupCount > 0) {
+                                            locHtml += `
+                                                <div class="mt-3 sm:mt-4 pt-4 border-t border-white/5 relative">
+                                                    <span class="absolute -top-2.5 left-3 sm:left-4 bg-slate-900 px-2 text-[9px] sm:text-[10px] font-bold uppercase tracking-wider text-amber-500/80 flex items-center gap-1 rounded-sm">
+                                                        <i class="fa-solid fa-user-shield"></i> Standby
+                                                    </span>
+                                                    <div class="space-y-2 sm:space-y-3 pt-1 sm:pt-2">
+                                            `;
+                                            for(let i=0; i<shift.backupCount; i++) {
+                                                const assignedBackup = state.assignments[activeDateKey]?.[location.id]?.[shift.id]?.backup?.[i];
+                                                if (assignedBackup) {
+                                                    locHtml += `
+                                                        <div class="flex items-center justify-between bg-amber-500/10 border border-amber-500/20 rounded-xl px-3 sm:px-4 py-2.5 sm:py-3 fade-in">
+                                                            <div class="flex items-center gap-2 sm:gap-3">
+                                                                <div class="w-5 h-5 sm:w-6 sm:h-6 rounded-full bg-amber-500/20 text-amber-300 flex items-center justify-center">
+                                                                    <i class="fa-solid fa-user-shield text-xs"></i>
+                                                                </div>
+                                                                <span class="font-semibold text-amber-100 text-sm">${assignedBackup}</span>
+                                                            </div>
+                                                            ${state.isAdmin ? `
+                                                                <button onclick="clearSlot('${activeDateKey}', '${location.id}', '${shift.id}', 'backup', ${i})" class="text-slate-500 hover:text-red-400 bg-slate-900/50 hover:bg-slate-800 p-1.5 rounded-lg transition-colors">
+                                                                    <i class="fa-solid fa-trash-can"></i>
+                                                                </button>
+                                                            ` : ''}
+                                                        </div>
+                                                    `;
+                                                } else {
+                                                    // Input Form Backup
+                                                    locHtml += `
+                                                        <div class="flex gap-2 items-center w-full fade-in">
+                                                            <div class="relative flex-1">
+                                                                <input id="input_${location.id}_${shift.id}_backup_${i}" type="text" placeholder="Backup name..."
+                                                                    class="w-full bg-slate-950/50 border border-amber-500/30 text-white rounded-xl pl-3 sm:pl-4 pr-8 py-2 sm:py-2.5 text-xs sm:text-sm focus:outline-none focus:ring-1 focus:border-amber-500 focus:ring-amber-500/50 placeholder-slate-500 transition-all shadow-inner" />
+                                                                <div class="absolute right-3 top-1/2 -translate-y-1/2 text-amber-500/70">
+                                                                    <i class="fa-solid fa-user-shield text-xs"></i>
+                                                                </div>
+                                                            </div>
+                                                            <button onclick="saveSlot('${activeDateKey}', '${location.id}', '${shift.id}', 'backup', ${i})"
+                                                                class="bg-amber-600 hover:bg-amber-500 text-white p-2 sm:p-2.5 rounded-xl transition-all shadow-md active:scale-95 flex-shrink-0">
+                                                                <i class="fa-solid fa-check"></i>
+                                                            </button>
+                                                        </div>
+                                                    `;
+                                                }
+                                            }
+                                            locHtml += `</div></div>`;
+                                        }
+                                        locHtml += `</div>`; // End shift block
+                                    });
+                                }
+
+                                locHtml += `</div></div>`; // End location block
+                                return locHtml;
+                            }).join('')}
+                            
+                            <!-- Admin Add New Location -->
+                            ${state.isAdmin ? `
+                                <div class="bg-indigo-950/20 border border-indigo-500/30 rounded-2xl sm:rounded-3xl p-4 sm:p-5 flex flex-col">
+                                    <h3 class="text-base sm:text-lg font-bold text-indigo-300 mb-4 flex items-center gap-2">
+                                        <i class="fa-solid fa-plus"></i> Add New Location
+                                    </h3>
+                                    <form onsubmit="addLocation(event)" class="space-y-3">
+                                        <input id="new_loc_name" required placeholder="Location Name *" class="w-full bg-slate-900/80 border border-white/10 text-white rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500" />
+                                        <input id="new_loc_map" placeholder="Google Maps Link URL (Optional)" class="w-full bg-slate-900/80 border border-white/10 text-white rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500" />
+                                        <input id="new_loc_phone" placeholder="Contact Phone Number (Optional)" class="w-full bg-slate-900/80 border border-white/10 text-white rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500" />
+                                        <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-3 rounded-xl text-sm font-bold transition-all shadow-md mt-2">
+                                            Create Location
+                                        </button>
+                                    </form>
+                                </div>
+                            ` : ''}
+                        </div>
+                    </main>
+
+                    <!-- Admin Login Modal -->
+                    ${state.showAdminLogin ? `
+                        <div class="fixed inset-0 z-50 flex items-center justify-center p-4">
+                            <div class="absolute inset-0 bg-slate-950/80 backdrop-blur-sm" onclick="toggleAdminModal(false)"></div>
+                            <div class="bg-slate-900 border border-white/10 w-full max-w-sm rounded-3xl shadow-2xl relative z-10 p-5 sm:p-6 fade-in">
+                                <div class="flex items-center gap-3 mb-5 text-indigo-400">
+                                    <i class="fa-solid fa-shield-halved text-2xl sm:text-3xl"></i>
+                                    <h3 class="text-lg sm:text-xl font-bold text-white">Admin Access</h3>
+                                </div>
+                                <form onsubmit="handleAdminAuth(event)" class="space-y-4">
+                                    <div>
+                                        <label class="text-xs sm:text-sm text-slate-400 mb-2 block">Enter PIN (Demo PIN: admin123)</label>
+                                        <input id="admin_pwd" type="password" placeholder="••••••••" class="w-full bg-slate-950 border border-white/10 text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500" autofocus />
+                                        ${state.loginError ? `<p class="text-red-400 text-xs mt-2">Incorrect PIN. Try 'admin123'.</p>` : ''}
+                                    </div>
+                                    <div class="flex gap-3 pt-2">
+                                        <button type="button" onclick="toggleAdminModal(false)" class="flex-1 bg-slate-800 hover:bg-slate-700 text-white py-2.5 sm:py-3 rounded-xl text-sm font-medium transition-colors">Cancel</button>
+                                        <button type="submit" class="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white py-2.5 sm:py-3 rounded-xl text-sm font-medium transition-colors">Unlock</button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    ` : ''}
+                </div>
+            `;
+            root.innerHTML = html;
+        };
+
+    </script>
+</body>
+</html>
+
