@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SMPW Kochi - Schedule Converter & Database Sync</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- FontAwesome CDN -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- SheetJS CDN for Excel Processing -->
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <!-- Supabase Client CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        .hide-scrollbar::-webkit-scrollbar { display: none; }
+        .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        .dropzone-active { border-color: #6366f1 !important; background-color: rgba(99, 102, 241, 0.1) !important; }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 text-slate-200 font-sans antialiased min-h-screen p-4 sm:p-8">
+
+    <div class="max-w-6xl mx-auto space-y-6">
+        
+        <!-- Header -->
+        <header class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-slate-900/80 border border-white/10 rounded-2xl p-5 backdrop-blur-xl shadow-2xl">
+            <div class="flex items-center gap-3">
+                <div class="bg-indigo-600 p-2.5 rounded-xl shadow-lg shadow-indigo-600/30 text-white">
+                    <i class="fa-solid fa-file-excel text-2xl"></i>
+                </div>
+                <div>
+                    <h1 class="text-xl sm:text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-indigo-200">
+                        SMPW Kochi Schedule Converter
+                    </h1>
+                    <p class="text-xs text-slate-400 mt-0.5">Transform raw software Excel schedules into live web formats & sync to database</p>
+                </div>
+            </div>
+            <a href="index.html" class="px-3.5 py-2 rounded-xl text-xs font-bold bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-white/10 transition-colors flex items-center gap-2">
+                <i class="fa-solid fa-arrow-left"></i> Back to Main Portal
+            </a>
+        </header>
+
+        <!-- Dropzone / Upload Area -->
+        <div id="dropzone" class="border-2 border-dashed border-white/20 hover:border-indigo-500/60 bg-slate-900/40 rounded-3xl p-8 sm:p-12 text-center transition-all cursor-pointer backdrop-blur-sm" onclick="document.getElementById('file_input').click()">
+            <input type="file" id="file_input" accept=".xlsx, .xls, .csv" class="hidden" onchange="handleFileSelect(event)" />
+            <div class="w-16 h-16 bg-indigo-600/20 text-indigo-400 border border-indigo-500/30 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-inner">
+                <i class="fa-solid fa-cloud-arrow-up text-3xl"></i>
+            </div>
+            <h3 class="text-lg font-bold text-white mb-1">Drag and drop your monthly schedule Excel file here</h3>
+            <p class="text-xs text-slate-400 max-w-md mx-auto mb-4">Supports 2D calendar matrices, vertically merged Spot cells, shift blocks, and multi-volunteer formats (.xlsx, .xls, .csv)</p>
+            <button type="button" class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2.5 rounded-xl text-xs font-bold shadow-lg transition-all">
+                Browse Files
+            </button>
+        </div>
+
+        <!-- Processing & Results Section (Hidden until file selected) -->
+        <div id="results_container" class="hidden space-y-6">
+            
+            <!-- Summary Stats Cards -->
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                <div class="bg-slate-900/80 border border-white/10 rounded-2xl p-4">
+                    <p class="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">Spots / Locations</p>
+                    <h4 id="stat_spots" class="text-2xl font-bold text-indigo-300">0</h4>
+                </div>
+                <div class="bg-slate-900/80 border border-white/10 rounded-2xl p-4">
+                    <p class="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">Shifts Configured</p>
+                    <h4 id="stat_shifts" class="text-2xl font-bold text-emerald-300">0</h4>
+                </div>
+                <div class="bg-slate-900/80 border border-white/10 rounded-2xl p-4">
+                    <p class="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">Days in Month</p>
+                    <h4 id="stat_days" class="text-2xl font-bold text-amber-300">0</h4>
+                </div>
+                <div class="bg-slate-900/80 border border-white/10 rounded-2xl p-4">
+                    <p class="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">Total Assignments</p>
+                    <h4 id="stat_volunteers" class="text-2xl font-bold text-purple-300">0</h4>
+                </div>
+            </div>
+
+            <!-- Action Buttons Toolbar -->
+            <div class="bg-slate-900/80 border border-white/10 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4">
+                <div>
+                    <h3 class="font-bold text-white text-sm">Conversion Complete</h3>
+                    <p class="text-xs text-slate-400">Review the extracted schedule below and publish directly to your live app.</p>
+                </div>
+                <div class="flex flex-wrap items-center gap-2.5 w-full sm:w-auto">
+                    <button onclick="pushToLiveDatabase()" id="btn_push" class="flex-1 sm:flex-none bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2.5 rounded-xl text-xs font-bold shadow-lg transition-all flex items-center justify-center gap-2">
+                        <i class="fa-solid fa-bolt"></i> Push to Supabase (Live Web App)
+                    </button>
+                    <button onclick="exportCleanExcel()" class="flex-1 sm:flex-none bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2.5 rounded-xl text-xs font-bold shadow-lg transition-all flex items-center justify-center gap-2">
+                        <i class="fa-solid fa-download"></i> Download Clean Excel
+                    </button>
+                    <button onclick="resetConverter()" class="p-2.5 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded-xl text-xs transition-colors" title="Reset">
+                        <i class="fa-solid fa-rotate-left"></i>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Progress Bar (During Push) -->
+            <div id="progress_wrapper" class="hidden bg-slate-900/80 border border-white/10 rounded-2xl p-4 space-y-2">
+                <div class="flex justify-between text-xs font-semibold">
+                    <span id="progress_label" class="text-indigo-300">Syncing to live database...</span>
+                    <span id="progress_pct" class="text-slate-400">0%</span>
+                </div>
+                <div class="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-white/5">
+                    <div id="progress_bar" class="bg-indigo-500 h-2.5 rounded-full transition-all duration-300" style="width: 0%"></div>
+                </div>
+            </div>
+
+            <!-- Parsed Data Preview Table -->
+            <div class="bg-slate-900/80 border border-white/10 rounded-2xl overflow-hidden shadow-2xl">
+                <div class="p-4 border-b border-white/10 flex justify-between items-center bg-slate-950/40">
+                    <h3 class="text-sm font-bold text-slate-200 flex items-center gap-2">
+                        <i class="fa-solid fa-table-list text-indigo-400"></i> Parsed Schedule Preview
+                    </h3>
+                    <span id="preview_count" class="text-xs text-slate-500">0 entries ready</span>
+                </div>
+                <div class="overflow-x-auto max-h-96 hide-scrollbar">
+                    <table class="w-full text-left text-xs border-collapse">
+                        <thead class="sticky top-0 bg-slate-950 text-slate-400 uppercase tracking-wider font-bold border-b border-white/10">
+                            <tr>
+                                <th class="p-3">Date</th>
+                                <th class="p-3">Spot (Location)</th>
+                                <th class="p-3">Shift Timing</th>
+                                <th class="p-3">Regular Volunteers</th>
+                                <th class="p-3">Standby / Backup</th>
+                            </tr>
+                        </thead>
+                        <tbody id="preview_tbody" class="divide-y divide-white/5 text-slate-300">
+                            <!-- Rows injected via JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+        </div>
+
+    </div>
+
+    <!-- Global Notification Toast Container -->
+    <div id="toast-container" class="fixed bottom-4 right-4 z-50 flex flex-col space-y-2 max-w-sm w-full px-4 pointer-events-none"></div>
+
+    <script>
+        // =======================================================================
+        // Supabase & App Configuration
+        // =======================================================================
+        var SUPABASE_URL = 'https://vffbprsuvrwkzvwnipvg.supabase.co';
+        var SUPABASE_ANON_KEY = 'sb_publishable_a2RUr35OTMoqN4FRA3aTgg_1kHxmFp1';
+        var supabaseClient = null;
+
+        if (window.supabase && typeof window.supabase.createClient === 'function') {
+            supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+        }
+
+        // Global Parsed State
+        var parsedData = {
+            spots: [],
+            shifts: [],
+            dates: [],
+            records: [] // Array of { spot, shift, dateKey, regularNames: [], standbyNames: [] }
+        };
+
+        // =======================================================================
+        // Drag & Drop Listeners
+        // =======================================================================
+        var dropzone = document.getElementById('dropzone');
+
+        dropzone.addEventListener('dragover', function(e) {
+            e.preventDefault();
+            dropzone.classList.add('dropzone-active');
+        });
+
+        dropzone.addEventListener('dragleave', function(e) {
+            e.preventDefault();
+            dropzone.classList.remove('dropzone-active');
+        });
+
+        dropzone.addEventListener('drop', function(e) {
+            e.preventDefault();
+            dropzone.classList.remove('dropzone-active');
+            if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                processFile(e.dataTransfer.files[0]);
+            }
+        });
+
+        function handleFileSelect(e) {
+            if (e.target.files && e.target.files.length > 0) {
+                processFile(e.target.files[0]);
+            }
+        }
+
+        // =======================================================================
+        // File Parsing Engine
+        // =======================================================================
+        function processFile(file) {
+            showToast('Analyzing and extracting schedule...', 'info');
+            var reader = new FileReader();
+
+            reader.onload = function(e) {
+                try {
+                    var data = new Uint8Array(e.target.result);
+                    var workbook = window.XLSX.read(data, { type: 'array' });
+                    var firstSheet = workbook.SheetNames[0];
+                    var worksheet = workbook.Sheets[firstSheet];
+
+                    // Convert sheet to raw 2D array coordinates
+                    var rawGrid = window.XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '', raw: false });
+                    if (!rawGrid || rawGrid.length === 0) {
+                        showToast('Spreadsheet contains no readable rows.', 'error');
+                        return;
+                    }
+
+                    parseRawScheduleGrid(rawGrid, worksheet);
+                } catch (err) {
+                    console.error('File parsing error:', err);
+                    showToast('Failed to parse file. Make sure it is a valid .xlsx file.', 'error');
+                }
+            };
+
+            reader.readAsArrayBuffer(file);
+        }
+
+        function parseRawScheduleGrid(rawGrid, worksheet) {
+            // 1. Locate Header Row
+            var headerRowIndex = -1;
+            for (var r = 0; r < Math.min(rawGrid.length, 12); r++) {
+                var rowStr = rawGrid[r].join(' ').toLowerCase();
+                if (rowStr.indexOf('spot') !== -1 || rowStr.indexOf('location') !== -1 || rowStr.indexOf('shift') !== -1 || rowStr.indexOf('date') !== -1) {
+                    headerRowIndex = r;
+                    break;
+                }
+            }
+            if (headerRowIndex === -1) headerRowIndex = 0;
+
+            var headerRow = rawGrid[headerRowIndex];
+            var isMatrixLayout = false;
+            var dateColumns = []; // { colIndex, dateKey }
+
+            // Detect horizontal date columns across the header
+            for (var c = 0; c < headerRow.length; c++) {
+                var headerVal = String(headerRow[c]).trim();
+                var pDate = parseDateValue(headerVal);
+                if (pDate) {
+                    isMatrixLayout = true;
+                    dateColumns.push({ colIndex: c, dateKey: formatDateKey(pDate) });
+                }
+            }
+
+            var extractedRecords = []; // Normalized list of { spot, shift, dateKey, regular: [], standby: [] }
+            var uniqueSpots = [];
+            var uniqueShifts = [];
+            var uniqueDates = [];
+            var lastKnownSpot = '';
+
+            if (isMatrixLayout) {
+                // --- MATRIX 2D GRID PARSER ---
+                var spotCol = 0, shiftCol = 1, typeCol = -1;
+                for (var h = 0; h < headerRow.length; h++) {
+                    var hText = String(headerRow[h]).toLowerCase();
+                    if (hText.indexOf('spot') !== -1 || hText.indexOf('location') !== -1) spotCol = h;
+                    if (hText.indexOf('shift') !== -1 || hText.indexOf('time') !== -1) shiftCol = h;
+                    if (hText.indexOf('type') !== -1 || hText.indexOf('slot') !== -1 || hText.indexOf('role') !== -1) typeCol = h;
+                }
+
+                for (var rowIdx = headerRowIndex + 1; rowIdx < rawGrid.length; rowIdx++) {
+                    var row = rawGrid[rowIdx];
+                    var spotVal = String(row[spotCol] || '').trim();
+                    if (spotVal) lastKnownSpot = spotVal;
+                    var currentSpot = lastKnownSpot;
+                    if (!currentSpot) continue;
+
+                    var shiftVal = String(row[shiftCol] || '').trim();
+                    if (!shiftVal) shiftVal = '08:00 AM - 10:00 AM';
+
+                    var typeVal = typeCol !== -1 ? String(row[typeCol] || '').toLowerCase() : '';
+                    var isStandby = typeVal.indexOf('standby') !== -1 || typeVal.indexOf('backup') !== -1;
+
+                    if (uniqueSpots.indexOf(currentSpot) === -1) uniqueSpots.push(currentSpot);
+                    if (uniqueShifts.indexOf(shiftVal) === -1) uniqueShifts.push(shiftVal);
+
+                    for (var d = 0; d < dateColumns.length; d++) {
+                        var dCol = dateColumns[d];
+                        var volunteerName = String(row[dCol.colIndex] || '').trim();
+                        if (!volunteerName) continue;
+
+                        if (uniqueDates.indexOf(dCol.dateKey) === -1) uniqueDates.push(dCol.dateKey);
+
+                        // Find or create record
+                        var existing = null;
+                        for (var rec = 0; rec < extractedRecords.length; rec++) {
+                            if (extractedRecords[rec].spot === currentSpot && extractedRecords[rec].shift === shiftVal && extractedRecords[rec].dateKey === dCol.dateKey) {
+                                existing = extractedRecords[rec];
+                                break;
+                            }
+                        }
+
+                        if (!existing) {
+                            existing = { spot: currentSpot, shift: shiftVal, dateKey: dCol.dateKey, regular: [], standby: [] };
+                            extractedRecords.push(existing);
+                        }
+
+                        if (isStandby) {
+                            existing.standby.push(volunteerName);
+                        } else {
+                            existing.regular.push(volunteerName);
+                        }
+                    }
+                }
+            } else {
+                // --- FLAT LIST / TABULAR PARSER ---
+                var flatRows = window.XLSX.utils.sheet_to_json(worksheet, { defval: '', range: headerRowIndex });
+                for (var i = 0; i < flatRows.length; i++) {
+                    var fRow = flatRows[i];
+                    var spotName = '', shiftName = '', dateVal = null;
+                    var regs = [], sbys = [];
+
+                    var keys = Object.keys(fRow);
+                    for (var k = 0; k < keys.length; k++) {
+                        var kName = keys[k].trim();
+                        var kLower = kName.toLowerCase();
+                        var val = String(fRow[kName]).trim();
+                        if (!val) continue;
+
+                        if (kLower.indexOf('spot') !== -1 || kLower.indexOf('location') !== -1) spotName = val;
+                        else if (kLower.indexOf('shift') !== -1 || kLower.indexOf('time') !== -1) shiftName = val;
+                        else if (kLower.indexOf('date') !== -1 || kLower.indexOf('day') !== -1) dateVal = parseDateValue(fRow[kName]);
+                        else if (kLower.indexOf('standby') !== -1 || kLower.indexOf('backup') !== -1) sbys.push(val);
+                        else if (kLower.indexOf('volunteer') !== -1 || kLower.indexOf('name') !== -1 || kLower === 'p1' || kLower === 'p2') regs.push(val);
+                    }
+
+                    if (spotName) lastKnownSpot = spotName;
+                    var activeSpot = lastKnownSpot;
+                    if (!activeSpot) continue;
+
+                    if (!shiftName) shiftName = '08:00 AM - 10:00 AM';
+                    if (!dateVal) dateVal = new Date();
+                    var dateKeyStr = formatDateKey(dateVal);
+
+                    if (uniqueSpots.indexOf(activeSpot) === -1) uniqueSpots.push(activeSpot);
+                    if (uniqueShifts.indexOf(shiftName) === -1) uniqueShifts.push(shiftName);
+                    if (uniqueDates.indexOf(dateKeyStr) === -1) uniqueDates.push(dateKeyStr);
+
+                    extractedRecords.push({
+                        spot: activeSpot,
+                        shift: shiftName,
+                        dateKey: dateKeyStr,
+                        regular: regs,
+                        standby: sbys
+                    });
+                }
+            }
+
+            if (extractedRecords.length === 0) {
+                showToast('No volunteer assignments found. Check column headers in your file.', 'error');
+                return;
+            }
+
+            // Save to global state
+            parsedData.spots = uniqueSpots;
+            parsedData.shifts = uniqueShifts;
+            parsedData.dates = uniqueDates;
+            parsedData.records = extractedRecords;
+
+            displayParsedResults();
+        }
+
+        // =======================================================================
+        // Results Display
+        // =======================================================================
+        function displayParsedResults() {
+            var totalVolunteers = 0;
+            for (var i = 0; i < parsedData.records.length; i++) {
+                totalVolunteers += (parsedData.records[i].regular.length + parsedData.records[i].standby.length);
+            }
+
+            document.getElementById('stat_spots').innerText = parsedData.spots.length;
+            document.getElementById('stat_shifts').innerText = parsedData.shifts.length;
+            document.getElementById('stat_days').innerText = parsedData.dates.length;
+            document.getElementById('stat_volunteers').innerText = totalVolunteers;
+            document.getElementById('preview_count').innerText = parsedData.records.length + ' shift slots extracted';
+
+            var tbody = document.getElementById('preview_tbody');
+            var html = '';
+
+            for (var r = 0; r < parsedData.records.length; r++) {
+                var item = parsedData.records[r];
+                html += '<tr class="hover:bg-slate-800/40 transition-colors">' +
+                    '<td class="p-3 font-mono text-indigo-300 font-bold">' + escapeHtml(item.dateKey) + '</td>' +
+                    '<td class="p-3 font-semibold text-white">' + escapeHtml(item.spot) + '</td>' +
+                    '<td class="p-3 text-slate-300">' + escapeHtml(item.shift) + '</td>' +
+                    '<td class="p-3"><span class="bg-indigo-950/60 text-indigo-200 px-2.5 py-1 rounded-md border border-indigo-500/20">' + escapeHtml(item.regular.join(', ') || 'None') + '</span></td>' +
+                    '<td class="p-3"><span class="bg-amber-950/60 text-amber-200 px-2.5 py-1 rounded-md border border-amber-500/20">' + escapeHtml(item.standby.join(', ') || 'None') + '</span></td>' +
+                '</tr>';
+            }
+
+            tbody.innerHTML = html;
+            document.getElementById('results_container').classList.remove('hidden');
+            showToast('Successfully extracted ' + totalVolunteers + ' volunteer duties!', 'success');
+        }
+
+        // =======================================================================
+        // Push Directly to Supabase Backend
+        // =======================================================================
+        function pushToLiveDatabase() {
+            if (!supabaseClient) {
+                showToast('Supabase client connection failed. Check API credentials.', 'error');
+                return;
+            }
+
+            var btn = document.getElementById('btn_push');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa-solid fa-spinner animate-spin"></i> Syncing to Supabase...';
+
+            var pWrapper = document.getElementById('progress_wrapper');
+            var pBar = document.getElementById('progress_bar');
+            var pPct = document.getElementById('progress_pct');
+            pWrapper.classList.remove('hidden');
+
+            // 1. Fetch contact map to auto-link phone numbers
+            supabaseClient.from('contacts').select('*').then(function(cRes) {
+                var contactMap = {};
+                var contacts = cRes.data || [];
+                for (var c = 0; c < contacts.length; c++) {
+                    contactMap[contacts[c].full_name.trim().toLowerCase()] = contacts[c].phone;
+                }
+
+                updateProgress(20, 'Syncing Locations & Duty Spots...');
+
+                // 2. Upsert Spots into locations table
+                var spotInserts = parsedData.spots.map(function(s) {
+                    return { name: s, address: s + ', Kochi Sector', is_active: true };
+                });
+
+                supabaseClient.from('locations').upsert(spotInserts, { onConflict: 'name' }).select().then(function(locRes) {
+                    // Re-query all locations to obtain UUIDs
+                    supabaseClient.from('locations').select('*').then(function(allLocRes) {
+                        var locList = allLocRes.data || [];
+                        var locMap = {};
+                        for (var l = 0; l < locList.length; l++) locMap[locList[l].name] = locList[l].id;
+
+                        updateProgress(40, 'Configuring Shift Timing Templates...');
+
+                        // 3. Upsert Shifts
+                        var shiftInserts = [];
+                        for (var i = 0; i < parsedData.records.length; i++) {
+                            var rec = parsedData.records[i];
+                            var locId = locMap[rec.spot];
+                            if (locId) {
+                                shiftInserts.push({
+                                    location_id: locId,
+                                    shift_name: rec.shift,
+                                    start_time: '08:00:00',
+                                    end_time: '12:00:00',
+                                    regular_capacity: 2,
+                                    standby_capacity: 1,
+                                    is_active: true
+                                });
+                            }
+                        }
+
+                        supabaseClient.from('shifts').upsert(shiftInserts).select().then(function() {
+                            supabaseClient.from('shifts').select('*').then(function(allShiftsRes) {
+                                var shiftsList = allShiftsRes.data || [];
+                                
+                                updateProgress(60, 'Creating Daily Schedule Slots & Bookings...');
+
+                                // 4. Sequential Insert for Schedule Slots & Bookings
+                                var totalSlots = parsedData.records.length;
+                                var completed = 0;
+
+                                parsedData.records.forEach(function(item) {
+                                    var lId = locMap[item.spot];
+                                    var sId = null;
+                                    for (var sh = 0; sh < shiftsList.length; sh++) {
+                                        if (shiftsList[sh].location_id === lId && shiftsList[sh].shift_name === item.shift) {
+                                            sId = shiftsList[sh].id;
+                                            break;
+                                        }
+                                    }
+                                    if (!sId && shiftsList.length > 0) sId = shiftsList[0].id;
+
+                                    var maxReg = Math.max(2, item.regular.length);
+                                    var maxSby = Math.max(1, item.standby.length);
+
+                                    supabaseClient.from('schedule_slots').upsert({
+                                        location_id: lId,
+                                        shift_id: sId,
+                                        slot_date: item.dateKey,
+                                        max_regular: maxReg,
+                                        max_standby: maxSby,
+                                        booked_regular: item.regular.length,
+                                        booked_standby: item.standby.length
+                                    }, { onConflict: 'location_id,shift_id,slot_date' }).select().single().then(function(slotResult) {
+                                        if (slotResult.data) {
+                                            var slotId = slotResult.data.id;
+                                            var bookingsToInsert = [];
+
+                                            item.regular.forEach(function(name) {
+                                                bookingsToInsert.push({
+                                                    slot_id: slotId,
+                                                    volunteer_name: name.trim(),
+                                                    volunteer_phone: contactMap[name.trim().toLowerCase()] || 'Registered Online',
+                                                    booking_type: 'REGULAR',
+                                                    status: 'CONFIRMED',
+                                                    is_confirmed: false
+                                                });
+                                            });
+
+                                            item.standby.forEach(function(name) {
+                                                bookingsToInsert.push({
+                                                    slot_id: slotId,
+                                                    volunteer_name: name.trim(),
+                                                    volunteer_phone: contactMap[name.trim().toLowerCase()] || 'Registered Online',
+                                                    booking_type: 'STANDBY',
+                                                    status: 'CONFIRMED',
+                                                    is_confirmed: false
+                                                });
+                                            });
+
+                                            if (bookingsToInsert.length > 0) {
+                                                supabaseClient.from('bookings').insert(bookingsToInsert).then(function() {
+                                                    checkComplete();
+                                                });
+                                            } else {
+                                                checkComplete();
+                                            }
+                                        } else {
+                                            checkComplete();
+                                        }
+                                    });
+                                });
+
+                                function checkComplete() {
+                                    completed++;
+                                    var pct = Math.round(60 + (completed / totalSlots) * 40);
+                                    updateProgress(pct, 'Publishing slots: ' + completed + ' of ' + totalSlots);
+
+                                    if (completed >= totalSlots) {
+                                        updateProgress(100, 'All schedule slots live in database!');
+                                        btn.disabled = false;
+                                        btn.innerHTML = '<i class="fa-solid fa-check"></i> Published Successfully';
+                                        showToast('Monthly schedule successfully pushed to live app!', 'success');
+                                    }
+                                }
+                            });
+                        });
+                    });
+                });
+            });
+        }
+
+        function updateProgress(pct, text) {
+            document.getElementById('progress_bar').style.width = pct + '%';
+            document.getElementById('progress_pct').innerText = pct + '%';
+            document.getElementById('progress_label').innerText = text;
+        }
+
+        // =======================================================================
+        // Clean Excel Exporter
+        // =======================================================================
+        function exportCleanExcel() {
+            var exportRows = [];
+            for (var i = 0; i < parsedData.records.length; i++) {
+                var r = parsedData.records[i];
+                exportRows.push({
+                    'Date': r.dateKey,
+                    'Spot (Location)': r.spot,
+                    'Shift Timing': r.shift,
+                    'Regular Volunteers': r.regular.join(', '),
+                    'Standby Volunteers': r.standby.join(', ')
+                });
+            }
+
+            var ws = window.XLSX.utils.json_to_sheet(exportRows);
+            var wb = window.XLSX.utils.book_new();
+            window.XLSX.utils.book_append_sheet(wb, ws, 'Clean_Schedule');
+            window.XLSX.writeFile(wb, 'SMPW_Kochi_Standardized_Schedule.xlsx');
+            showToast('Clean Excel file exported!', 'success');
+        }
+
+        function resetConverter() {
+            document.getElementById('file_input').value = '';
+            document.getElementById('results_container').classList.add('hidden');
+            document.getElementById('progress_wrapper').classList.add('hidden');
+            var btn = document.getElementById('btn_push');
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fa-solid fa-bolt"></i> Push to Supabase (Live Web App)';
+            parsedData = { spots: [], shifts: [], dates: [], records: [] };
+        }
+
+        // =======================================================================
+        // Date Parsing Helpers
+        // =======================================================================
+        function parseDateValue(val) {
+            if (!val) return null;
+            if (val instanceof Date && !isNaN(val.getTime())) return val;
+
+            // Handle Excel serial date numbers (e.g. 45230)
+            if (typeof val === 'number') {
+                return new Date((val - 25569) * 86400 * 1000);
+            }
+
+            var str = String(val).trim();
+            // Match standalone day numbers 1 through 31
+            if (/^\d{1,2}$/.test(str)) {
+                var dayNum = parseInt(str, 10);
+                if (dayNum >= 1 && dayNum <= 31) {
+                    var now = new Date();
+                    return new Date(now.getFullYear(), now.getMonth(), dayNum);
+                }
+            }
+
+            var parsed = new Date(str);
+            if (!isNaN(parsed.getTime())) return parsed;
+            return null;
+        }
+
+        function formatDateKey(dateObj) {
+            var d = new Date(dateObj);
+            var year = d.getFullYear();
+            var month = ('0' + (d.getMonth() + 1)).slice(-2);
+            var day = ('0' + d.getDate()).slice(-2);
+            return year + '-' + month + '-' + day;
+        }
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+        }
+
+        function showToast(message, type) {
+            var container = document.getElementById('toast-container');
+            if (!container) return;
+            var toast = document.createElement('div');
+            var bgStyle = 'bg-slate-900 border-white/10 text-white';
+            if (type === 'error') bgStyle = 'bg-rose-950/90 border-rose-500/30 text-rose-200';
+            if (type === 'success') bgStyle = 'bg-emerald-950/90 border-emerald-500/30 text-emerald-200';
+            if (type === 'info') bgStyle = 'bg-indigo-950/90 border-indigo-500/30 text-indigo-200';
+
+            toast.className = 'pointer-events-auto p-3.5 rounded-2xl border shadow-2xl text-xs font-semibold flex items-center justify-between transition-all duration-300 ' + bgStyle;
+            toast.innerHTML = '<span>' + escapeHtml(message) + '</span>';
+            container.appendChild(toast);
+
+            setTimeout(function() {
+                toast.style.opacity = '0';
+                setTimeout(function() { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 300);
+            }, 3500);
+        }
+    </script>
+</body>
+</html>
