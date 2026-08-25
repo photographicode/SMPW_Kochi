@@ -3,13 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>SMPW Kochi Scheduler</title>
+    <title>SMPW Kochi - Duty Scheduler</title>
     <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- FontAwesome Icons CDN -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <!-- Supabase JS Client CDN -->
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <!-- SheetJS CDN for Native In-Browser Excel Parsing -->
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
     <style>
         .hide-scrollbar::-webkit-scrollbar { display: none; }
         .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
@@ -37,8 +39,9 @@
         var CONFIG = {
             SUPABASE_URL: 'https://vffbprsuvrwkzvwnipvg.supabase.co',
             SUPABASE_ANON_KEY: 'sb_publishable_a2RUr35OTMoqN4FRA3aTgg_1kHxmFp1',
-            LOCAL_STORAGE_KEY: 'smpw_kochi_cache_v3',
-            ADMIN_SESSION_KEY: 'smpw_admin_auth_v3',
+            LOCAL_STORAGE_KEY: 'smpw_kochi_cache_v5',
+            ADMIN_SESSION_KEY: 'smpw_admin_auth_v5',
+            USER_SESSION_KEY: 'smpw_user_auth_v5',
             FALLBACK_PIN: '9847'
         };
 
@@ -58,9 +61,11 @@
             shifts: [],
             slots: [],
             bookings: [],
+            contacts: [],
             availableDates: [],
             selectedDate: null,
             isAdmin: false,
+            currentUser: null, // { phone: '', full_name: '' }
             showAdminLogin: false,
             loginError: false,
             editingLocationId: null,
@@ -68,7 +73,7 @@
         };
 
         // =======================================================================
-        // Date & Helper Utilities (Legacy Compatible)
+        // Utilities (Legacy JS Compatible - No ?. or ?? syntax)
         // =======================================================================
         function generateNext30Days() {
             var dates = [];
@@ -114,9 +119,7 @@
         function formatMapUrl(rawUrl) {
             if (!rawUrl) return '';
             var trimmed = rawUrl.trim();
-            if (trimmed.indexOf('http://') === 0 || trimmed.indexOf('https://') === 0) {
-                return trimmed;
-            }
+            if (trimmed.indexOf('http://') === 0 || trimmed.indexOf('https://') === 0) return trimmed;
             return 'https://maps.google.com/?q=' + encodeURIComponent(trimmed);
         }
 
@@ -124,16 +127,13 @@
             var buffer = new TextEncoder('utf-8').encode(str);
             return crypto.subtle.digest('SHA-256', buffer).then(function(hashBuffer) {
                 var hashArray = Array.from(new Uint8Array(hashBuffer));
-                return hashArray.map(function(b) {
-                    return ('00' + b.toString(16)).slice(-2);
-                }).join('');
+                return hashArray.map(function(b) { return ('00' + b.toString(16)).slice(-2); }).join('');
             });
         }
 
         function showToast(message, type) {
             var container = document.getElementById('toast-container');
             if (!container) return;
-
             var toast = document.createElement('div');
             var bgStyle = 'bg-slate-900 border-white/10 text-white';
             if (type === 'error') bgStyle = 'bg-rose-950/90 border-rose-500/30 text-rose-200';
@@ -145,9 +145,7 @@
 
             setTimeout(function() {
                 toast.style.opacity = '0';
-                setTimeout(function() {
-                    if (toast.parentNode) toast.parentNode.removeChild(toast);
-                }, 300);
+                setTimeout(function() { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 300);
             }, 3500);
         }
 
@@ -159,9 +157,7 @@
                 try {
                     var data = localStorage.getItem(CONFIG.LOCAL_STORAGE_KEY);
                     return data ? JSON.parse(data) : null;
-                } catch (e) {
-                    return null;
-                }
+                } catch (e) { return null; }
             },
             saveCache: function() {
                 try {
@@ -169,24 +165,30 @@
                         locations: state.locations,
                         shifts: state.shifts,
                         slots: state.slots,
-                        bookings: state.bookings
+                        bookings: state.bookings,
+                        contacts: state.contacts
                     }));
                 } catch (e) {}
             },
             isAdminAuth: function() {
-                try {
-                    return sessionStorage.getItem(CONFIG.ADMIN_SESSION_KEY) === 'true';
-                } catch (e) {
-                    return false;
-                }
+                try { return sessionStorage.getItem(CONFIG.ADMIN_SESSION_KEY) === 'true'; } catch (e) { return false; }
             },
             setAdminAuth: function(status) {
                 try {
-                    if (status) {
-                        sessionStorage.setItem(CONFIG.ADMIN_SESSION_KEY, 'true');
-                    } else {
-                        sessionStorage.removeItem(CONFIG.ADMIN_SESSION_KEY);
-                    }
+                    if (status) sessionStorage.setItem(CONFIG.ADMIN_SESSION_KEY, 'true');
+                    else sessionStorage.removeItem(CONFIG.ADMIN_SESSION_KEY);
+                } catch (e) {}
+            },
+            getUserAuth: function() {
+                try {
+                    var userStr = localStorage.getItem(CONFIG.USER_SESSION_KEY);
+                    return userStr ? JSON.parse(userStr) : null;
+                } catch (e) { return null; }
+            },
+            setUserAuth: function(user) {
+                try {
+                    if (user) localStorage.setItem(CONFIG.USER_SESSION_KEY, JSON.stringify(user));
+                    else localStorage.removeItem(CONFIG.USER_SESSION_KEY);
                 } catch (e) {}
             }
         };
@@ -199,6 +201,7 @@
                 state.availableDates = generateNext30Days();
                 state.selectedDate = state.availableDates[0];
                 state.isAdmin = StorageEngine.isAdminAuth();
+                state.currentUser = StorageEngine.getUserAuth();
 
                 var cached = StorageEngine.getCache();
                 if (cached && cached.locations && cached.locations.length > 0) {
@@ -206,6 +209,7 @@
                     state.shifts = cached.shifts || [];
                     state.slots = cached.slots || [];
                     state.bookings = cached.bookings || [];
+                    state.contacts = cached.contacts || [];
                     state.dataLoaded = true;
                     renderApp();
                 }
@@ -230,30 +234,23 @@
                     supabaseClient.from('locations').select('*').eq('is_active', true).order('display_order'),
                     supabaseClient.from('shifts').select('*').eq('is_active', true),
                     supabaseClient.from('schedule_slots').select('*').eq('slot_date', dateKey),
-                    supabaseClient.from('bookings').select('*').eq('status', 'CONFIRMED')
+                    supabaseClient.from('bookings').select('*').eq('status', 'CONFIRMED'),
+                    supabaseClient.from('contacts').select('*')
                 ]).then(function(results) {
-                    var locRes = results[0];
-                    var shiftRes = results[1];
-                    var slotRes = results[2];
-                    var bookRes = results[3];
-
-                    if (!locRes.error && locRes.data) state.locations = locRes.data;
-                    if (!shiftRes.error && shiftRes.data) state.shifts = shiftRes.data;
-                    if (!slotRes.error && slotRes.data) state.slots = slotRes.data;
-                    if (!bookRes.error && bookRes.data) state.bookings = bookRes.data;
+                    if (!results[0].error && results[0].data) state.locations = results[0].data;
+                    if (!results[1].error && results[1].data) state.shifts = results[1].data;
+                    if (!results[2].error && results[2].data) state.slots = results[2].data;
+                    if (!results[3].error && results[3].data) state.bookings = results[3].data;
+                    if (!results[4].error && results[4].data) state.contacts = results[4].data;
 
                     state.dataLoaded = true;
                     state.isSyncing = false;
                     state.syncError = false;
 
                     StorageEngine.saveCache();
-
                     var activeTag = document.activeElement ? document.activeElement.tagName : '';
-                    if (activeTag !== 'INPUT') {
-                        renderApp();
-                    }
+                    if (activeTag !== 'INPUT') renderApp();
                 }).catch(function(err) {
-                    console.error('Sync failure:', err);
                     state.isSyncing = false;
                     state.syncError = true;
                     state.dataLoaded = true;
@@ -264,17 +261,14 @@
             setupRealtime: function() {
                 if (!supabaseClient) return;
                 var self = this;
-
                 try {
-                    if (state.realtimeChannel) {
-                        supabaseClient.removeChannel(state.realtimeChannel);
-                    }
-
+                    if (state.realtimeChannel) supabaseClient.removeChannel(state.realtimeChannel);
                     state.realtimeChannel = supabaseClient.channel('kochi-realtime-sync')
                         .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, function() { self.syncWithDatabase(); })
                         .on('postgres_changes', { event: '*', schema: 'public', table: 'schedule_slots' }, function() { self.syncWithDatabase(); })
                         .on('postgres_changes', { event: '*', schema: 'public', table: 'locations' }, function() { self.syncWithDatabase(); })
                         .on('postgres_changes', { event: '*', schema: 'public', table: 'shifts' }, function() { self.syncWithDatabase(); })
+                        .on('postgres_changes', { event: '*', schema: 'public', table: 'contacts' }, function() { self.syncWithDatabase(); })
                         .subscribe();
                 } catch (e) {}
             },
@@ -291,18 +285,16 @@
         };
 
         // =======================================================================
-        // User Slot Actions (Save & Clear)
+        // User Slot Actions & Attendance Checkmark
         // =======================================================================
-        window.saveSlot = function(locationId, shiftId, slotType, slotIndex) {
-            var inputId = 'input_' + locationId + '_' + shiftId + '_' + slotType + '_' + slotIndex;
-            var inputEl = document.getElementById(inputId);
-            var name = inputEl ? inputEl.value.trim() : '';
-
-            if (!name) {
-                showToast('Please type your name first', 'error');
+        window.claimYellowSlot = function(locationId, shiftId, slotType) {
+            if (!state.currentUser) {
+                showToast('Please log in with your phone number to claim this slot', 'error');
                 return;
             }
 
+            var name = state.currentUser.full_name;
+            var phone = state.currentUser.phone;
             var dateKey = formatDateKey(state.selectedDate);
             var targetSlot = null;
 
@@ -317,19 +309,20 @@
                 supabaseClient.rpc('claim_slot_atomic', {
                     p_slot_id: slotRecordId,
                     p_volunteer_name: name,
-                    p_volunteer_phone: 'Registered Online',
+                    p_volunteer_phone: phone,
                     p_booking_type: slotType.toUpperCase()
                 }).then(function(res) {
                     if (res.data && res.data.success) {
-                        showToast('Slot reserved successfully!', 'success');
+                        if (res.data.booking_id) {
+                            supabaseClient.from('bookings').update({ is_confirmed: true }).eq('id', res.data.booking_id).then(function() {});
+                        }
+                        showToast('Slot claimed successfully!', 'success');
                         AppEngine.syncWithDatabase();
                     } else {
                         var msg = res.data && res.data.message ? res.data.message : 'Slot could not be confirmed';
                         showToast(msg, 'error');
                     }
-                }).catch(function() {
-                    showToast('Connection issue reserving slot', 'error');
-                });
+                }).catch(function() { showToast('Connection issue claiming slot', 'error'); });
             }
 
             if (targetSlot) {
@@ -343,7 +336,6 @@
                         break;
                     }
                 }
-
                 supabaseClient.from('schedule_slots').insert([{
                     location_id: locationId,
                     shift_id: shiftId,
@@ -361,96 +353,245 @@
             }
         };
 
-        window.clearBooking = function(bookingId) {
-            if (!state.isAdmin) return;
-            if (!confirm('Remove this volunteer registration?')) return;
+        window.toggleAttendanceConfirmation = function(bookingId, currentConfirmedState) {
+            var newState = !currentConfirmedState;
+            supabaseClient.from('bookings').update({ is_confirmed: newState }).eq('id', bookingId).then(function(res) {
+                if (!res.error) {
+                    showToast(newState ? 'Attendance confirmed! (Slot is Green)' : 'Attendance unmarked', 'success');
+                    AppEngine.syncWithDatabase();
+                } else {
+                    showToast('Error updating confirmation', 'error');
+                }
+            });
+        };
+
+        window.adminRemoveVolunteer = function(bookingId, slotId, bookingType) {
+            if (!confirm('Remove this volunteer from the schedule? The slot will turn Yellow for replacements.')) return;
 
             supabaseClient.from('bookings').delete().eq('id', bookingId).then(function(res) {
                 if (!res.error) {
-                    showToast('Volunteer removed', 'success');
+                    var targetSlot = null;
+                    for (var s = 0; s < state.slots.length; s++) {
+                        if (state.slots[s].id === slotId) { targetSlot = state.slots[s]; break; }
+                    }
+                    if (targetSlot) {
+                        var updatePayload = {};
+                        if (bookingType === 'REGULAR') {
+                            updatePayload.booked_regular = Math.max(0, targetSlot.booked_regular - 1);
+                        } else {
+                            updatePayload.booked_standby = Math.max(0, targetSlot.booked_standby - 1);
+                        }
+                        supabaseClient.from('schedule_slots').update(updatePayload).eq('id', slotId).then(function() {});
+                    }
+                    showToast('Volunteer removed. Slot is now Yellow (Open).', 'success');
                     AppEngine.syncWithDatabase();
                 } else {
-                    showToast('Error removing booking', 'error');
+                    showToast('Error removing volunteer', 'error');
                 }
             });
         };
 
         // =======================================================================
-        // Dynamic Slot Capacity Modification (Fixed Reg & Backup Counters)
+        // Excel Contact Upload & Master Roster Ingestion
         // =======================================================================
-        window.updateShiftSlots = function(locationId, shiftId, type, change) {
-            var targetShift = null;
-            for (var i = 0; i < state.shifts.length; i++) {
-                if (state.shifts[i].id === shiftId) {
-                    targetShift = state.shifts[i];
-                    break;
+        window.triggerExcelContactUpload = function() {
+            document.getElementById('excel_contact_input').click();
+        };
+
+        window.handleExcelContactUpload = function(event) {
+            var file = event.target.files[0];
+            if (!file) return;
+
+            var reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    var data = new Uint8Array(e.target.result);
+                    var workbook = window.XLSX.read(data, {type: 'array'});
+                    var firstSheet = workbook.SheetNames[0];
+                    var rows = window.XLSX.utils.sheet_to_json(workbook.Sheets[firstSheet]);
+                    
+                    var newContacts = [];
+                    for (var i = 0; i < rows.length; i++) {
+                        var row = rows[i];
+                        var phone = row['Phone'] || row['Phone Number'] || row['Contact'] || row['phone'] || row['Mobile'];
+                        var name = row['Name'] || row['Full Name'] || row['Volunteer Name'] || row['name'] || row['Volunteer'];
+                        
+                        if (phone && name) {
+                            var cleanPhone = String(phone).replace(/\D/g, '');
+                            if (cleanPhone.length > 5) {
+                                newContacts.push({ phone: cleanPhone, full_name: String(name).trim() });
+                            }
+                        }
+                    }
+
+                    if (newContacts.length === 0) {
+                        showToast('No valid rows found. Ensure "Name" and "Phone" columns exist.', 'error');
+                        return;
+                    }
+
+                    supabaseClient.from('contacts').upsert(newContacts).then(function(res) {
+                        if (!res.error) {
+                            showToast('Successfully updated ' + newContacts.length + ' authorized contacts!', 'success');
+                            AppEngine.syncWithDatabase();
+                        } else {
+                            showToast('Database error importing contacts', 'error');
+                        }
+                    });
+                } catch (err) {
+                    showToast('Failed to parse Excel file', 'error');
                 }
-            }
-            if (!targetShift) return;
-
-            var currentVal = type === 'slotsCount' ? (targetShift.regular_capacity || 2) : (targetShift.standby_capacity || 1);
-            var newVal = Math.max(0, currentVal + change);
-
-            // Optimistic UI update on Shift template
-            if (type === 'slotsCount') {
-                targetShift.regular_capacity = newVal;
-            } else {
-                targetShift.standby_capacity = newVal;
-            }
-
-            var dateKey = formatDateKey(state.selectedDate);
-            var targetSlot = null;
-            for (var k = 0; k < state.slots.length; k++) {
-                if (state.slots[k].shift_id === shiftId && state.slots[k].slot_date === dateKey) {
-                    targetSlot = state.slots[k];
-                    break;
-                }
-            }
-
-            // Optimistic UI update on active day slot
-            if (targetSlot) {
-                if (type === 'slotsCount') targetSlot.max_regular = newVal;
-                else targetSlot.max_standby = newVal;
-            }
-
-            renderApp(); // Instant visual response
-
-            // 1. Update Shift Template in DB
-            var shiftPayload = {};
-            if (type === 'slotsCount') shiftPayload.regular_capacity = newVal;
-            else shiftPayload.standby_capacity = newVal;
-
-            supabaseClient.from('shifts').update(shiftPayload).eq('id', shiftId).then(function(res) {
-                if (res.error) {
-                    showToast('Database Error: ' + res.error.message, 'error');
-                }
-            });
-
-            // 2. Update or Insert Today's Slot Record in DB
-            if (targetSlot) {
-                var slotPayload = {};
-                if (type === 'slotsCount') slotPayload.max_regular = newVal;
-                else slotPayload.max_standby = newVal;
-
-                supabaseClient.from('schedule_slots').update(slotPayload).eq('id', targetSlot.id).then(function() {
-                    AppEngine.syncWithDatabase();
-                });
-            } else {
-                supabaseClient.from('schedule_slots').insert([{
-                    location_id: locationId,
-                    shift_id: shiftId,
-                    slot_date: dateKey,
-                    max_regular: targetShift.regular_capacity,
-                    max_standby: targetShift.standby_capacity
-                }]).then(function() {
-                    AppEngine.syncWithDatabase();
-                });
-            }
+            };
+            reader.readAsArrayBuffer(file);
         };
 
         // =======================================================================
-        // UI & Admin Handlers
+        // 1-Click WhatsApp Automations (Direct Batch & Group Broadcast)
         // =======================================================================
+        window.sendSingleWhatsAppReminder = function(phone, volunteerName, locationName, shiftName) {
+            var dateStr = formatDisplayDate(state.selectedDate);
+            var message = "Hello " + volunteerName + ",\n\nThis is a reminder for your SMPW Kochi duty:\n\n📍 Location: " + locationName + "\n📅 Date: " + dateStr + "\n⏰ Shift: " + shiftName + "\n\nPlease open the portal and check the box to confirm your attendance.\nThank you!";
+            var cleanPhone = String(phone).replace(/\D/g, '');
+            if (cleanPhone.length === 10) cleanPhone = '91' + cleanPhone;
+            
+            var waLink = "https://wa.me/" + cleanPhone + "?text=" + encodeURIComponent(message);
+            window.open(waLink, '_blank');
+        };
+
+        window.sendAllWhatsAppRemindersBatch = function() {
+            var activeDateKey = formatDateKey(state.selectedDate);
+            var activeBookings = [];
+
+            for (var b = 0; b < state.bookings.length; b++) {
+                var bSlotId = state.bookings[b].slot_id;
+                for (var s = 0; s < state.slots.length; s++) {
+                    if (state.slots[s].id === bSlotId && state.slots[s].slot_date === activeDateKey) {
+                        activeBookings.push({
+                            booking: state.bookings[b],
+                            slot: state.slots[s]
+                        });
+                        break;
+                    }
+                }
+            }
+
+            if (activeBookings.length === 0) {
+                showToast('No assigned volunteers to remind for this date.', 'error');
+                return;
+            }
+
+            var unconfirmedCount = 0;
+            for (var i = 0; i < activeBookings.length; i++) {
+                var item = activeBookings[i];
+                if (!item.booking.is_confirmed) {
+                    unconfirmedCount++;
+                    var locName = 'Duty Station';
+                    for (var l = 0; l < state.locations.length; l++) {
+                        if (state.locations[l].id === item.slot.location_id) { locName = state.locations[l].name; break; }
+                    }
+                    var shiftName = 'Scheduled Timing';
+                    for (var sh = 0; sh < state.shifts.length; sh++) {
+                        if (state.shifts[sh].id === item.slot.shift_id) { shiftName = state.shifts[sh].shift_name; break; }
+                    }
+                    
+                    window.sendSingleWhatsAppReminder(item.booking.volunteer_phone, item.booking.volunteer_name, locName, shiftName);
+                }
+            }
+
+            if (unconfirmedCount === 0) {
+                showToast('All volunteers for this date have already confirmed attendance!', 'success');
+            } else {
+                showToast('Opening ' + unconfirmedCount + ' WhatsApp reminder chats...', 'success');
+            }
+        };
+
+        window.copyWhatsAppGroupBroadcast = function() {
+            var activeDateKey = formatDateKey(state.selectedDate);
+            var text = "📋 *SMPW KOCHI DUTY ROSTER*\n📅 *" + formatDisplayDate(state.selectedDate) + "*\n━━━━━━━━━━━━━━━━━━━━\n\n";
+
+            for (var l = 0; l < state.locations.length; l++) {
+                var loc = state.locations[l];
+                var locShifts = state.shifts.filter(function(s) { return s.location_id === loc.id; });
+                if (locShifts.length > 0) {
+                    text += "📍 *" + loc.name.toUpperCase() + "*\n";
+                    for (var s = 0; s < locShifts.length; s++) {
+                        var shift = locShifts[s];
+                        var slot = null;
+                        for (var sl = 0; sl < state.slots.length; sl++) {
+                            if (state.slots[sl].shift_id === shift.id && state.slots[sl].slot_date === activeDateKey) {
+                                slot = state.slots[sl]; break;
+                            }
+                        }
+                        text += "⏰ " + shift.shift_name + ":\n";
+                        var bks = [];
+                        if (slot) {
+                            for (var b = 0; b < state.bookings.length; b++) {
+                                if (state.bookings[b].slot_id === slot.id) bks.push(state.bookings[b]);
+                            }
+                        }
+                        if (bks.length === 0) {
+                            text += "   ⚠️ _[OPEN SLOTS AVAILABLE]_\n";
+                        } else {
+                            for (var k = 0; k < bks.length; k++) {
+                                var badge = bks[k].is_confirmed ? "✅" : "⏳";
+                                text += "   • " + bks[k].volunteer_name + " (" + bks[k].booking_type + ") " + badge + "\n";
+                            }
+                        }
+                    }
+                    text += "\n";
+                }
+            }
+
+            text += "🔗 *Confirm or Claim Slots Online:* " + window.location.href;
+
+            navigator.clipboard.writeText(text).then(function() {
+                showToast('Roster summary copied! Paste directly into WhatsApp.', 'success');
+            }).catch(function() {
+                showToast('Unable to access clipboard', 'error');
+            });
+        };
+
+        // =======================================================================
+        // Authentication Handlers
+        // =======================================================================
+        window.handleUserLogin = function(e) {
+            e.preventDefault();
+            var phoneInput = document.getElementById('user_phone_login');
+            var rawPhone = phoneInput ? phoneInput.value.trim() : '';
+            var cleanPhone = rawPhone.replace(/\D/g, '');
+
+            if (!cleanPhone) {
+                showToast('Please enter a valid phone number', 'error');
+                return;
+            }
+
+            supabaseClient.from('contacts').select('*').then(function(res) {
+                var list = res.data || [];
+                var matched = null;
+                for (var i = 0; i < list.length; i++) {
+                    var storedClean = String(list[i].phone).replace(/\D/g, '');
+                    if (storedClean === cleanPhone || storedClean.indexOf(cleanPhone) !== -1 || cleanPhone.indexOf(storedClean) !== -1) {
+                        matched = list[i];
+                        break;
+                    }
+                }
+
+                if (matched) {
+                    state.currentUser = { phone: matched.phone, full_name: matched.full_name };
+                    StorageEngine.setUserAuth(state.currentUser);
+                    showToast('Welcome, ' + matched.full_name + '!', 'success');
+                    renderApp();
+                } else {
+                    showToast('Phone number not found in authorized roster. Contact Admin.', 'error');
+                }
+            }).catch(function() { showToast('Authentication check error', 'error'); });
+        };
+
+        window.logoutUser = function() {
+            state.currentUser = null;
+            StorageEngine.setUserAuth(null);
+            renderApp();
+        };
+
         window.selectDate = function(isoString) {
             state.selectedDate = new Date(isoString);
             AppEngine.syncWithDatabase();
@@ -502,108 +643,160 @@
             renderApp();
         };
 
+        // =======================================================================
+        // Dynamic Slot Capacity Modification (Admin)
+        // =======================================================================
+        window.updateShiftSlots = function(locationId, shiftId, type, change) {
+            var targetShift = null;
+            for (var i = 0; i < state.shifts.length; i++) {
+                if (state.shifts[i].id === shiftId) { targetShift = state.shifts[i]; break; }
+            }
+            if (!targetShift) return;
+
+            var currentVal = type === 'slotsCount' ? (targetShift.regular_capacity || 2) : (targetShift.standby_capacity || 1);
+            var newVal = Math.max(0, currentVal + change);
+
+            if (type === 'slotsCount') targetShift.regular_capacity = newVal;
+            else targetShift.standby_capacity = newVal;
+
+            var dateKey = formatDateKey(state.selectedDate);
+            var targetSlot = null;
+            for (var k = 0; k < state.slots.length; k++) {
+                if (state.slots[k].shift_id === shiftId && state.slots[k].slot_date === dateKey) { targetSlot = state.slots[k]; break; }
+            }
+
+            if (targetSlot) {
+                if (type === 'slotsCount') targetSlot.max_regular = newVal;
+                else targetSlot.max_standby = newVal;
+            }
+
+            renderApp(); 
+
+            var shiftPayload = {};
+            if (type === 'slotsCount') shiftPayload.regular_capacity = newVal;
+            else shiftPayload.standby_capacity = newVal;
+            supabaseClient.from('shifts').update(shiftPayload).eq('id', shiftId).then(function() {});
+
+            if (targetSlot) {
+                var slotPayload = {};
+                if (type === 'slotsCount') slotPayload.max_regular = newVal;
+                else slotPayload.max_standby = newVal;
+                supabaseClient.from('schedule_slots').update(slotPayload).eq('id', targetSlot.id).then(function() { AppEngine.syncWithDatabase(); });
+            } else {
+                supabaseClient.from('schedule_slots').insert([{
+                    location_id: locationId, shift_id: shiftId, slot_date: dateKey, max_regular: targetShift.regular_capacity, max_standby: targetShift.standby_capacity
+                }]).then(function() { AppEngine.syncWithDatabase(); });
+            }
+        };
+
         window.addLocation = function(e) {
             e.preventDefault();
             var name = document.getElementById('new_loc_name').value.trim();
             var mapUrl = document.getElementById('new_loc_map').value.trim();
             if (!name) return;
-
-            supabaseClient.from('locations').insert([{
-                name: name,
-                address: mapUrl,
-                is_active: true
-            }]).then(function(res) {
-                if (!res.error) {
-                    showToast('Duty station created', 'success');
-                    AppEngine.syncWithDatabase();
-                } else {
-                    showToast('Error: ' + res.error.message, 'error');
-                }
+            supabaseClient.from('locations').insert([{ name: name, address: mapUrl, is_active: true }]).then(function(res) {
+                if (!res.error) { showToast('Duty station created', 'success'); AppEngine.syncWithDatabase(); }
             });
         };
-
         window.deleteLocation = function(id) {
             if (!confirm('Are you sure you want to delete this entire location?')) return;
-            supabaseClient.from('locations').delete().eq('id', id).then(function() {
-                showToast('Location deleted', 'info');
-                AppEngine.syncWithDatabase();
-            });
+            supabaseClient.from('locations').delete().eq('id', id).then(function() { showToast('Location deleted', 'info'); AppEngine.syncWithDatabase(); });
         };
-
-        window.setEditingLocation = function(id) {
-            state.editingLocationId = id;
-            renderApp();
-        };
-
+        window.setEditingLocation = function(id) { state.editingLocationId = id; renderApp(); };
         window.saveEditLocation = function(id) {
             var name = document.getElementById('edit_name_' + id).value.trim();
             var mapUrl = document.getElementById('edit_map_' + id).value.trim();
             if (!name) return;
-
-            supabaseClient.from('locations').update({
-                name: name,
-                address: mapUrl
-            }).eq('id', id).then(function() {
-                state.editingLocationId = null;
-                showToast('Location link updated', 'success');
-                AppEngine.syncWithDatabase();
+            supabaseClient.from('locations').update({ name: name, address: mapUrl }).eq('id', id).then(function() {
+                state.editingLocationId = null; showToast('Location link updated', 'success'); AppEngine.syncWithDatabase();
             });
         };
-
         window.addShift = function(locId) {
             var labelEl = document.getElementById('new_shift_' + locId);
             var label = labelEl ? labelEl.value.trim() : '';
             if (!label) return;
-
             supabaseClient.from('shifts').insert([{
-                location_id: locId,
-                shift_name: label,
-                start_time: '08:00:00',
-                end_time: '12:00:00',
-                regular_capacity: 2,
-                standby_capacity: 1,
-                is_active: true
-            }]).then(function(res) {
-                if (!res.error) {
-                    showToast('Shift template created', 'success');
-                    AppEngine.syncWithDatabase();
-                } else {
-                    showToast('Error adding shift', 'error');
-                }
-            });
+                location_id: locId, shift_name: label, start_time: '08:00:00', end_time: '12:00:00', regular_capacity: 2, standby_capacity: 1, is_active: true
+            }]).then(function(res) { if (!res.error) AppEngine.syncWithDatabase(); });
         };
-
         window.deleteShift = function(shiftId) {
             if (!confirm('Delete this duty shift timing?')) return;
-            supabaseClient.from('shifts').delete().eq('id', shiftId).then(function() {
-                showToast('Shift removed', 'info');
-                AppEngine.syncWithDatabase();
-            });
+            supabaseClient.from('shifts').delete().eq('id', shiftId).then(function() { AppEngine.syncWithDatabase(); });
         };
 
         // =======================================================================
-        // Master Render Engine
+        // Master Render Engine (Restricted Visibility + Yellow/Green Slots)
         // =======================================================================
         function renderApp() {
             var root = document.getElementById('app-root');
-            if (!state.dataLoaded || !state.selectedDate) return;
+            if (!state.dataLoaded) return;
 
+            // 1. Phone Login Gate for Volunteers
+            if (!state.isAdmin && !state.currentUser) {
+                var loginHtml = '<div class="min-h-screen flex items-center justify-center p-4">' +
+                    '<div class="bg-slate-900 border border-white/10 w-full max-w-sm rounded-3xl shadow-2xl p-6 text-center">' +
+                        '<div class="bg-indigo-600/20 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 border border-indigo-500/30">' +
+                            '<i class="fa-solid fa-user-check text-2xl text-indigo-400"></i>' +
+                        '</div>' +
+                        '<h2 class="text-xl font-bold text-white mb-2">SMPW Kochi Login</h2>' +
+                        '<p class="text-sm text-slate-400 mb-6">Enter your registered phone number to access your duty assignments.</p>' +
+                        '<form onsubmit="handleUserLogin(event)" class="space-y-4 text-left">' +
+                            '<div>' +
+                                '<label class="text-xs text-slate-400 mb-1.5 block uppercase tracking-wider font-bold">Mobile Phone Number</label>' +
+                                '<input id="user_phone_login" type="tel" placeholder="e.g. 9847012345" class="w-full bg-slate-950 border border-white/10 text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500" autofocus />' +
+                            '</div>' +
+                            '<button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-3 rounded-xl text-sm font-bold shadow-md transition-colors">' +
+                                'Sign In to Schedule' +
+                            '</button>' +
+                        '</form>' +
+                        '<div class="mt-6 pt-4 border-t border-white/5">' +
+                            '<button onclick="toggleAdminModal(true)" class="text-xs text-slate-500 hover:text-indigo-400 font-semibold transition-colors">' +
+                                'Overseer / Admin Login' +
+                            '</button>' +
+                        '</div>' +
+                    '</div>';
+
+                if (state.showAdminLogin) {
+                    loginHtml += '<div class="fixed inset-0 z-50 flex items-center justify-center p-4">' +
+                        '<div class="absolute inset-0 bg-slate-950/80 backdrop-blur-sm" onclick="toggleAdminModal(false)"></div>' +
+                        '<div class="bg-slate-900 border border-white/10 w-full max-w-sm rounded-3xl shadow-2xl relative z-10 p-5 sm:p-6 fade-in">' +
+                            '<div class="flex items-center gap-3 mb-5 text-indigo-400">' +
+                                '<i class="fa-solid fa-shield-halved text-2xl sm:text-3xl"></i>' +
+                                '<h3 class="text-lg sm:text-xl font-bold text-white">Admin Clearance</h3>' +
+                            '</div>' +
+                            '<form onsubmit="handleAdminAuth(event)" class="space-y-4">' +
+                                '<div>' +
+                                    '<label class="text-xs sm:text-sm text-slate-400 mb-2 block">Enter Security PIN</label>' +
+                                    '<input id="admin_pwd" type="password" placeholder="••••" class="w-full bg-slate-950 border border-white/10 text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500" autofocus />' +
+                                    (state.loginError ? '<p class="text-rose-400 text-xs mt-2 font-semibold">Incorrect PIN.</p>' : '') +
+                                '</div>' +
+                                '<div class="flex gap-3 pt-2">' +
+                                    '<button type="button" onclick="toggleAdminModal(false)" class="flex-1 bg-slate-800 hover:bg-slate-700 text-white py-2.5 sm:py-3 rounded-xl text-sm font-medium transition-colors">Cancel</button>' +
+                                    '<button type="submit" class="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white py-2.5 sm:py-3 rounded-xl text-sm font-medium transition-colors">Unlock</button>' +
+                                '</div>' +
+                            '</form>' +
+                        '</div></div>';
+                }
+                loginHtml += '</div>';
+                root.innerHTML = loginHtml;
+                return;
+            }
+
+            // 2. Main Authenticated Interface
             var activeDateKey = formatDateKey(state.selectedDate);
-
             var activeDayCount = 0;
             for (var b = 0; b < state.bookings.length; b++) {
                 var bSlotId = state.bookings[b].slot_id;
                 for (var s = 0; s < state.slots.length; s++) {
                     if (state.slots[s].id === bSlotId && state.slots[s].slot_date === activeDateKey) {
-                        activeDayCount++;
-                        break;
+                        activeDayCount++; break;
                     }
                 }
             }
 
             var html = '<div class="min-h-screen pb-16">';
 
-            // Header
+            // Navigation Header
             html += '<header class="sticky top-0 z-30 bg-slate-950/80 backdrop-blur-xl border-b border-white/10 shadow-lg">' +
                 '<div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 sm:py-4 flex justify-between items-center">' +
                     '<div class="flex items-center gap-2 sm:gap-3">' +
@@ -617,16 +810,42 @@
                             '</h1>' +
                         '</div>' +
                     '</div>' +
-                    '<button onclick="' + (state.isAdmin ? 'logoutAdmin()' : 'toggleAdminModal(true)') + '" ' +
-                        'class="flex items-center gap-1.5 sm:gap-2 px-3 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all shadow-sm border ' +
-                        (state.isAdmin ? 'bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-slate-800/80 hover:bg-slate-700 border-white/5 text-slate-400') + '">' +
-                        '<i class="fa-solid ' + (state.isAdmin ? 'fa-lock-open' : 'fa-lock') + '"></i>' +
-                        '<span class="hidden sm:inline">' + (state.isAdmin ? 'Admin Active' : 'Admin Login') + '</span>' +
-                    '</button>' +
+                    '<div class="flex items-center gap-2">' +
+                        (!state.isAdmin && state.currentUser ? 
+                            '<div class="hidden sm:flex items-center gap-2 mr-2 text-emerald-400 text-sm font-bold bg-emerald-950/40 px-3 py-1.5 rounded-lg border border-emerald-500/30"><i class="fa-solid fa-circle-user"></i> ' + escapeHtml(state.currentUser.full_name) + '</div>' : '') +
+                        '<button onclick="' + (state.isAdmin ? 'logoutAdmin()' : 'logoutUser()') + '" ' +
+                            'class="flex items-center gap-1.5 sm:gap-2 px-3 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all shadow-sm border ' +
+                            (state.isAdmin ? 'bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 border-indigo-500/30' : 'bg-slate-800/80 hover:bg-slate-700 border-white/5 text-slate-400') + '">' +
+                            '<i class="fa-solid fa-right-from-bracket"></i>' +
+                            '<span class="hidden sm:inline">' + (state.isAdmin ? 'Lock Admin' : 'Logout') + '</span>' +
+                        '</button>' +
+                    '</div>' +
                 '</div>' +
             '</header>';
 
             html += '<main class="max-w-7xl mx-auto px-2 sm:px-6 lg:px-8 py-4 sm:py-6">';
+
+            // Admin Actions Toolbar: WhatsApp Reminders & Contact Upload
+            if (state.isAdmin) {
+                html += '<div class="bg-indigo-950/20 border border-indigo-500/30 rounded-2xl p-4 sm:p-5 mb-6 flex flex-col md:flex-row items-center justify-between gap-4 shadow-xl">' +
+                    '<div>' +
+                        '<h3 class="font-bold text-indigo-300 flex items-center gap-2"><i class="fa-solid fa-wand-magic-sparkles"></i> Overseer Broadcast & Roster Tools</h3>' +
+                        '<p class="text-xs text-indigo-400/70 mt-1">1-Click WhatsApp reminder queues and Excel contact updates.</p>' +
+                    '</div>' +
+                    '<div class="flex flex-wrap items-center gap-2 w-full md:w-auto">' +
+                        '<button onclick="sendAllWhatsAppRemindersBatch()" class="flex-1 md:flex-none bg-emerald-600 hover:bg-emerald-500 text-white px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold shadow-md transition-colors flex items-center justify-center gap-1.5">' +
+                            '<i class="fa-brands fa-whatsapp text-base"></i> Send All WhatsApp Reminders' +
+                        '</button>' +
+                        '<button onclick="copyWhatsAppGroupBroadcast()" class="flex-1 md:flex-none bg-indigo-600 hover:bg-indigo-500 text-white px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold shadow-md transition-colors flex items-center justify-center gap-1.5">' +
+                            '<i class="fa-solid fa-copy"></i> Copy Group Summary' +
+                        '</button>' +
+                        '<input type="file" id="excel_contact_input" accept=".xlsx, .xls, .csv" class="hidden" onchange="handleExcelContactUpload(event)" />' +
+                        '<button onclick="triggerExcelContactUpload()" class="flex-1 md:flex-none bg-slate-800 hover:bg-slate-700 text-slate-200 border border-white/10 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold shadow-md transition-colors flex items-center justify-center gap-1.5">' +
+                            '<i class="fa-solid fa-file-excel text-emerald-400"></i> Upload New Contact List' +
+                        '</button>' +
+                    '</div>' +
+                '</div>';
+            }
 
             // 30-Day Date Carousel
             html += '<div class="mb-6">' +
@@ -655,27 +874,19 @@
 
             html += '</div></div>';
 
-            // Selected Date Title
+            // Selected Date Title & Status
             html += '<div class="flex flex-col mb-4 sm:mb-6 mt-2 border-b border-white/10 pb-3 sm:pb-4 px-2 sm:px-0">' +
                 '<h2 class="text-xl sm:text-3xl font-bold text-white tracking-tight">' +
                     formatDisplayDate(state.selectedDate) +
                 '</h2>' +
                 '<p class="text-indigo-300/80 mt-1 text-xs sm:text-sm flex items-center gap-1.5 sm:gap-2">' +
                     '<span class="w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full bg-indigo-500 animate-pulse"></span>' +
-                    activeDayCount + ' assignments active today' +
+                    (state.isAdmin ? (activeDayCount + ' volunteer duties assigned') : 'Green = Your Confirmed Duty | Yellow = Open Slots Available') +
                 '</p>' +
             '</div>';
 
             // Locations Grid
             html += '<div class="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">';
-
-            if (state.locations.length === 0) {
-                html += '<div class="col-span-full p-8 text-center bg-slate-900/60 rounded-3xl border border-white/10 text-slate-400">' +
-                    '<i class="fa-solid fa-location-dot text-2xl mb-2 text-indigo-400"></i>' +
-                    '<p class="text-sm font-semibold">No duty stations configured yet.</p>' +
-                    (state.isAdmin ? '<p class="text-xs text-slate-500 mt-1">Use the "Add New Duty Station" panel below to get started.</p>' : '') +
-                '</div>';
-            }
 
             for (var l = 0; l < state.locations.length; l++) {
                 var loc = state.locations[l];
@@ -687,11 +898,11 @@
                 // Location Header
                 if (isEditing) {
                     html += '<div class="p-4 sm:p-5 border-b border-white/5 bg-slate-800/80 flex flex-col gap-3">' +
-                        '<input id="edit_name_' + loc.id + '" value="' + escapeHtml(loc.name) + '" placeholder="Location Name" class="w-full bg-slate-950 border border-white/10 text-white rounded-xl px-3 py-2 text-sm focus:ring-1 focus:ring-indigo-500" />' +
-                        '<input id="edit_map_' + loc.id + '" value="' + escapeHtml(loc.address || '') + '" placeholder="Google Maps Link URL or Address" class="w-full bg-slate-950 border border-white/10 text-white rounded-xl px-3 py-2 text-sm focus:ring-1 focus:ring-indigo-500" />' +
+                        '<input id="edit_name_' + loc.id + '" value="' + escapeHtml(loc.name) + '" class="w-full bg-slate-950 border border-white/10 text-white rounded-xl px-3 py-2 text-sm focus:ring-1 focus:ring-indigo-500" />' +
+                        '<input id="edit_map_' + loc.id + '" value="' + escapeHtml(loc.address || '') + '" class="w-full bg-slate-950 border border-white/10 text-white rounded-xl px-3 py-2 text-sm focus:ring-1 focus:ring-indigo-500" />' +
                         '<div class="flex gap-2 justify-end mt-1">' +
                             '<button onclick="setEditingLocation(null)" class="px-4 py-2 bg-slate-700 text-white rounded-lg text-sm font-medium">Cancel</button>' +
-                            '<button onclick="saveEditLocation(\'' + loc.id + '\')" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-medium flex items-center gap-1"><i class="fa-solid fa-floppy-disk"></i> Save</button>' +
+                            '<button onclick="saveEditLocation(\'' + loc.id + '\')" class="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium"><i class="fa-solid fa-floppy-disk"></i> Save</button>' +
                         '</div>' +
                     '</div>';
                 } else {
@@ -701,55 +912,44 @@
                                 '<i class="fa-solid fa-location-dot text-indigo-400"></i>' +
                                 '<span class="break-words">' + escapeHtml(loc.name) + '</span>' +
                             '</h3>' +
-                            '<div class="flex flex-wrap items-center gap-2 sm:gap-4 mt-1">' +
-                                (loc.address ? 
-                                    '<a href="' + escapeHtml(mapLink) + '" target="_blank" rel="noopener noreferrer" class="bg-indigo-950/60 hover:bg-indigo-900/60 text-xs sm:text-sm text-indigo-300 hover:text-indigo-100 px-3 py-1.5 rounded-lg flex items-center gap-2 transition-colors border border-indigo-500/30 shadow-sm">' +
-                                        '<i class="fa-solid fa-map-location-dot text-indigo-400"></i>' +
-                                        '<span>Open Location Map</span>' +
-                                        '<i class="fa-solid fa-arrow-up-right-from-square text-[10px] text-indigo-400/70"></i>' +
-                                    '</a>' : '') +
-                            '</div>' +
+                            (loc.address ? 
+                                '<a href="' + escapeHtml(mapLink) + '" target="_blank" rel="noopener noreferrer" class="bg-indigo-950/60 text-xs sm:text-sm text-indigo-300 hover:text-indigo-100 px-3 py-1.5 rounded-lg inline-flex items-center gap-2 border border-indigo-500/30 shadow-sm">' +
+                                    '<i class="fa-solid fa-map-location-dot text-indigo-400"></i> Open Location Map <i class="fa-solid fa-arrow-up-right-from-square text-[10px]"></i>' +
+                                '</a>' : '') +
                         '</div>' +
                         (state.isAdmin ? 
                             '<div class="flex gap-1.5">' +
-                                '<button onclick="setEditingLocation(\'' + loc.id + '\')" class="p-2 bg-slate-800 hover:bg-indigo-500/20 text-slate-400 hover:text-indigo-400 rounded-lg transition-colors border border-white/5"><i class="fa-solid fa-pen-to-square"></i></button>' +
-                                '<button onclick="deleteLocation(\'' + loc.id + '\')" class="p-2 bg-slate-800 hover:bg-red-500/20 text-slate-400 hover:text-red-400 rounded-lg transition-colors border border-white/5"><i class="fa-solid fa-trash-can"></i></button>' +
+                                '<button onclick="setEditingLocation(\'' + loc.id + '\')" class="p-2 bg-slate-800 text-slate-400 rounded-lg"><i class="fa-solid fa-pen-to-square"></i></button>' +
+                                '<button onclick="deleteLocation(\'' + loc.id + '\')" class="p-2 bg-slate-800 text-slate-400"><i class="fa-solid fa-trash-can"></i></button>' +
                             '</div>' : '') +
                     '</div>';
                 }
 
-                // Admin Add Shift
                 if (state.isAdmin && !isEditing) {
                     html += '<div class="bg-slate-950/40 p-3 sm:p-4 border-b border-white/5 flex gap-2">' +
-                        '<input id="new_shift_' + loc.id + '" placeholder="New timing (e.g., 08:00 AM - 10:00 AM)" class="flex-1 bg-slate-900 border border-white/10 text-white rounded-xl px-3 py-2 text-xs sm:text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500" />' +
-                        '<button onclick="addShift(\'' + loc.id + '\')" class="bg-emerald-600 hover:bg-emerald-500 text-white px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold shadow-md"><i class="fa-solid fa-plus"></i></button>' +
+                        '<input id="new_shift_' + loc.id + '" placeholder="New timing (e.g. 08:00 AM - 10:00 AM)" class="flex-1 bg-slate-900 border border-white/10 text-white rounded-xl px-3 py-2 text-sm focus:ring-1 focus:ring-indigo-500" />' +
+                        '<button onclick="addShift(\'' + loc.id + '\')" class="bg-emerald-600 text-white px-4 py-2 rounded-xl text-sm font-bold"><i class="fa-solid fa-plus"></i></button>' +
                     '</div>';
                 }
 
-                // Shifts Container
                 html += '<div class="p-3 sm:p-5 flex-1 flex flex-col gap-4 sm:gap-6">';
 
                 var locShifts = state.shifts.filter(function(s) { return s.location_id === loc.id; });
-
                 if (locShifts.length === 0) {
-                    html += '<p class="text-slate-500 text-xs sm:text-sm italic py-4 text-center border border-dashed border-slate-700 rounded-xl">No shifts configured for this station.</p>';
+                    html += '<p class="text-slate-500 text-sm italic py-4 text-center border border-dashed border-slate-700 rounded-xl">No shifts configured.</p>';
                 } else {
                     for (var sIdx = 0; sIdx < locShifts.length; sIdx++) {
                         var shift = locShifts[sIdx];
-
                         var currentSlot = null;
                         for (var sl = 0; sl < state.slots.length; sl++) {
                             if (state.slots[sl].shift_id === shift.id && state.slots[sl].slot_date === activeDateKey) {
-                                currentSlot = state.slots[sl];
-                                break;
+                                currentSlot = state.slots[sl]; break;
                             }
                         }
-
                         var regCap = currentSlot ? currentSlot.max_regular : (shift.regular_capacity || 2);
                         var sbyCap = currentSlot ? currentSlot.max_standby : (shift.standby_capacity || 1);
 
-                        var regBookings = [];
-                        var sbyBookings = [];
+                        var regBookings = []; var sbyBookings = [];
                         if (currentSlot) {
                             for (var bk = 0; bk < state.bookings.length; bk++) {
                                 if (state.bookings[bk].slot_id === currentSlot.id) {
@@ -759,162 +959,110 @@
                             }
                         }
 
-                        html += '<div class="bg-slate-950/40 border border-white/5 rounded-xl sm:rounded-2xl p-3 sm:p-5 shadow-inner">' +
-                            '<div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 pb-3 border-b border-white/5">' +
+                        html += '<div class="bg-slate-950/40 border border-white/5 rounded-xl p-3 sm:p-5 shadow-inner">' +
+                            '<div class="flex flex-col sm:flex-row justify-between mb-4 pb-3 border-b border-white/5">' +
                                 '<div class="text-indigo-300 font-bold text-sm sm:text-[15px] flex items-center gap-2">' +
                                     '<i class="fa-solid fa-clock text-indigo-400"></i> ' + escapeHtml(shift.shift_name) +
                                 '</div>' +
                                 (state.isAdmin ? 
-                                    '<div class="flex flex-wrap items-center gap-2 sm:gap-4 bg-slate-900/80 p-1.5 sm:p-2 rounded-xl border border-white/5">' +
-                                        '<div class="flex items-center gap-1.5 bg-slate-800/80 px-2 py-1 rounded-lg">' +
-                                            '<span class="text-[10px] text-slate-400 uppercase tracking-wider font-bold mr-1">Reg:</span>' +
-                                            '<button onclick="updateShiftSlots(\'' + loc.id + '\', \'' + shift.id + '\', \'slotsCount\', -1)" class="p-1 text-slate-400 hover:text-white bg-slate-700 rounded"><i class="fa-solid fa-minus text-[10px]"></i></button>' +
-                                            '<span class="text-white text-xs font-bold w-3 text-center">' + regCap + '</span>' +
-                                            '<button onclick="updateShiftSlots(\'' + loc.id + '\', \'' + shift.id + '\', \'slotsCount\', 1)" class="p-1 text-slate-400 hover:text-white bg-slate-700 rounded"><i class="fa-solid fa-plus text-[10px]"></i></button>' +
-                                        '</div>' +
-                                        '<div class="flex items-center gap-1.5 bg-slate-800/80 px-2 py-1 rounded-lg border border-amber-500/20">' +
-                                            '<span class="text-[10px] text-amber-500/70 uppercase tracking-wider font-bold mr-1">Bak:</span>' +
-                                            '<button onclick="updateShiftSlots(\'' + loc.id + '\', \'' + shift.id + '\', \'backupCount\', -1)" class="p-1 text-amber-500 hover:text-amber-300 bg-slate-700 rounded"><i class="fa-solid fa-minus text-[10px]"></i></button>' +
-                                            '<span class="text-amber-400 text-xs font-bold w-3 text-center">' + sbyCap + '</span>' +
-                                            '<button onclick="updateShiftSlots(\'' + loc.id + '\', \'' + shift.id + '\', \'backupCount\', 1)" class="p-1 text-amber-500 hover:text-amber-300 bg-slate-700 rounded"><i class="fa-solid fa-plus text-[10px]"></i></button>' +
-                                        '</div>' +
-                                        '<button onclick="deleteShift(\'' + shift.id + '\')" class="p-1.5 ml-auto sm:ml-0 text-slate-500 hover:text-red-400 bg-slate-800 rounded-lg transition-colors"><i class="fa-solid fa-trash-can"></i></button>' +
+                                    '<div class="flex items-center gap-2 bg-slate-900/80 p-1.5 rounded-xl border border-white/5 mt-2 sm:mt-0">' +
+                                        '<div class="flex items-center gap-1.5 bg-slate-800/80 px-2 py-1 rounded-lg"><span class="text-[10px] text-slate-400 font-bold">REG:</span><button onclick="updateShiftSlots(\'' + loc.id + '\', \'' + shift.id + '\', \'slotsCount\', -1)" class="p-1 text-slate-400 bg-slate-700 rounded"><i class="fa-solid fa-minus text-[10px]"></i></button><span class="text-white text-xs font-bold w-3 text-center">' + regCap + '</span><button onclick="updateShiftSlots(\'' + loc.id + '\', \'' + shift.id + '\', \'slotsCount\', 1)" class="p-1 text-slate-400 bg-slate-700 rounded"><i class="fa-solid fa-plus text-[10px]"></i></button></div>' +
+                                        '<div class="flex items-center gap-1.5 bg-slate-800/80 px-2 py-1 rounded-lg border border-amber-500/20"><span class="text-[10px] text-amber-500/70 font-bold">BAK:</span><button onclick="updateShiftSlots(\'' + loc.id + '\', \'' + shift.id + '\', \'backupCount\', -1)" class="p-1 text-amber-500 bg-slate-700 rounded"><i class="fa-solid fa-minus text-[10px]"></i></button><span class="text-amber-400 text-xs font-bold w-3 text-center">' + sbyCap + '</span><button onclick="updateShiftSlots(\'' + loc.id + '\', \'' + shift.id + '\', \'backupCount\', 1)" class="p-1 text-amber-500 bg-slate-700 rounded"><i class="fa-solid fa-plus text-[10px]"></i></button></div>' +
+                                        '<button onclick="deleteShift(\'' + shift.id + '\')" class="p-1.5 text-slate-500 bg-slate-800 rounded-lg"><i class="fa-solid fa-trash-can"></i></button>' +
                                     '</div>' : '') +
                             '</div>';
 
-                        // Regular Slots Render
-                        if (regCap > 0) {
-                            html += '<div class="space-y-2 sm:space-y-3 mb-4 sm:mb-5">';
-                            for (var r = 0; r < regCap; r++) {
-                                var assignedReg = regBookings[r];
-                                if (assignedReg) {
-                                    html += '<div class="flex items-center justify-between bg-indigo-500/10 border border-indigo-500/20 rounded-xl px-3 sm:px-4 py-2.5 sm:py-3 fade-in">' +
-                                        '<div class="flex items-center gap-2 sm:gap-3">' +
-                                            '<div class="w-5 h-5 sm:w-6 sm:h-6 rounded-full bg-indigo-500/20 text-indigo-300 flex items-center justify-center">' +
-                                                '<i class="fa-solid fa-users text-xs"></i>' +
+                        // Generator for Role-Based Color Coding (Yellow Available vs Green Checked)
+                        function renderSlots(capacity, bookings, typeStr, icon, highlightColor) {
+                            var slotHtml = '<div class="space-y-2.5 sm:space-y-3 mb-4">';
+                            for (var c = 0; c < capacity; c++) {
+                                var assigned = bookings[c];
+                                if (assigned) {
+                                    var cleanUserPhone = state.currentUser ? String(state.currentUser.phone).replace(/\D/g, '') : '';
+                                    var cleanAssignedPhone = String(assigned.volunteer_phone).replace(/\D/g, '');
+                                    var isMine = !state.isAdmin && state.currentUser && (cleanUserPhone === cleanAssignedPhone || (cleanAssignedPhone.length > 5 && cleanUserPhone.indexOf(cleanAssignedPhone) !== -1));
+
+                                    if (state.isAdmin) {
+                                        var isConf = assigned.is_confirmed;
+                                        slotHtml += '<div class="flex flex-col sm:flex-row sm:items-center justify-between ' + (isConf ? 'bg-emerald-500/15 border-emerald-500/30' : 'bg-slate-800/80 border-white/5') + ' border rounded-xl px-3.5 py-2.5 shadow-sm">' +
+                                            '<div class="flex items-center gap-2.5 mb-2 sm:mb-0">' +
+                                                '<div class="w-6 h-6 rounded-full ' + (isConf ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-700 text-slate-400') + ' flex items-center justify-center"><i class="fa-solid ' + (isConf ? 'fa-check' : icon) + ' text-xs"></i></div>' +
+                                                '<div><span class="font-bold ' + (isConf ? 'text-emerald-100' : 'text-slate-200') + ' text-sm">' + escapeHtml(assigned.volunteer_name) + '</span><span class="text-[10px] text-slate-400 ml-2">(' + escapeHtml(assigned.volunteer_phone) + ')</span></div>' +
                                             '</div>' +
-                                            '<span class="font-semibold text-indigo-100 text-sm">' + escapeHtml(assignedReg.volunteer_name) + '</span>' +
-                                        '</div>' +
-                                        (state.isAdmin ? 
-                                            '<button onclick="clearBooking(\'' + assignedReg.id + '\')" class="text-slate-500 hover:text-red-400 bg-slate-900/50 hover:bg-slate-800 p-1.5 rounded-lg transition-colors" title="Remove"><i class="fa-solid fa-trash-can"></i></button>' : '') +
-                                    '</div>';
+                                            '<div class="flex items-center gap-1.5">' +
+                                                '<button onclick="sendSingleWhatsAppReminder(\'' + escapeHtml(assigned.volunteer_phone) + '\', \'' + escapeHtml(assigned.volunteer_name) + '\', \'' + escapeHtml(loc.name) + '\', \'' + escapeHtml(shift.shift_name) + '\')" class="text-xs bg-emerald-600 hover:bg-emerald-500 text-white px-2.5 py-1.5 rounded-lg flex items-center gap-1"><i class="fa-brands fa-whatsapp"></i> Remind</button>' +
+                                                '<button onclick="adminRemoveVolunteer(\'' + assigned.id + '\', \'' + (currentSlot ? currentSlot.id : '') + '\', \'' + typeStr + '\')" class="text-slate-400 hover:text-red-400 bg-slate-900/60 p-1.5 rounded-lg" title="Remove name (Turns Yellow)"><i class="fa-solid fa-trash-can"></i></button>' +
+                                            '</div></div>';
+                                    } else if (isMine) {
+                                        var isConf = assigned.is_confirmed;
+                                        slotHtml += '<div class="flex items-center justify-between ' + (isConf ? 'bg-emerald-500/20 border-emerald-500/40' : 'bg-indigo-500/20 border-indigo-500/40') + ' border rounded-xl px-4 py-3 shadow-lg">' +
+                                            '<div class="flex items-center gap-3">' +
+                                                '<div class="w-7 h-7 rounded-full ' + (isConf ? 'bg-emerald-500 text-slate-950' : 'bg-indigo-600 text-white') + ' flex items-center justify-center">' +
+                                                    '<i class="fa-solid ' + (isConf ? 'fa-check' : 'fa-clock') + ' text-sm"></i>' +
+                                                '</div>' +
+                                                '<div>' +
+                                                    '<span class="font-bold text-white text-sm">' + escapeHtml(assigned.volunteer_name) + ' (You)</span>' +
+                                                    '<p class="text-[10px] ' + (isConf ? 'text-emerald-300 font-bold' : 'text-indigo-300') + '">' + (isConf ? '✓ Attendance Confirmed' : 'Please check box to confirm attendance') + '</p>' +
+                                                '</div>' +
+                                            '</div>' +
+                                            '<button onclick="toggleAttendanceConfirmation(\'' + assigned.id + '\', ' + isConf + ')" class="px-3 py-1.5 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5 ' + (isConf ? 'bg-emerald-600 text-white shadow-sm' : 'bg-slate-800 text-slate-300 border border-white/10 hover:bg-slate-700') + '">' +
+                                                '<i class="fa-solid ' + (isConf ? 'fa-circle-check' : 'fa-circle') + '"></i> ' + (isConf ? 'Confirmed' : 'Confirm') +
+                                            '</button>' +
+                                        '</div>';
+                                    } else {
+                                        slotHtml += '<div class="flex items-center gap-3 bg-slate-800/40 border border-white/5 rounded-xl px-4 py-2.5 opacity-50">' +
+                                            '<div class="w-5 h-5 rounded-full bg-slate-700 text-slate-500 flex items-center justify-center"><i class="fa-solid fa-lock text-[10px]"></i></div>' +
+                                            '<span class="font-semibold text-slate-400 text-xs sm:text-sm">Assigned Slot (Filled)</span>' +
+                                        '</div>';
+                                    }
                                 } else {
-                                    html += '<div class="flex gap-2 items-center w-full fade-in">' +
-                                        '<div class="relative flex-1">' +
-                                            '<input id="input_' + loc.id + '_' + shift.id + '_regular_' + r + '" type="text" placeholder="Your name..." ' +
-                                                'class="w-full bg-slate-950/50 border border-indigo-500/30 text-white rounded-xl pl-3 sm:pl-4 pr-8 py-2 sm:py-2.5 text-xs sm:text-sm focus:outline-none focus:ring-1 focus:border-indigo-500 focus:ring-indigo-500/50 placeholder-slate-500 transition-all shadow-inner" ' +
-                                                'onkeydown="if(event.key === \'Enter\') saveSlot(\'' + loc.id + '\', \'' + shift.id + '\', \'regular\', ' + r + ')" />' +
-                                            '<div class="absolute right-3 top-1/2 -translate-y-1/2 text-indigo-500/70">' +
-                                                '<i class="fa-solid fa-users text-xs"></i>' +
+                                    if (state.isAdmin) {
+                                        slotHtml += '<div class="flex items-center gap-3 bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-2.5 opacity-80">' +
+                                            '<div class="w-6 h-6 rounded-full bg-amber-500/20 text-amber-300 flex items-center justify-center"><i class="fa-solid fa-user-plus text-xs"></i></div>' +
+                                            '<span class="font-bold text-amber-200 text-xs sm:text-sm">Open ' + (typeStr === 'REGULAR' ? 'Regular' : 'Standby') + ' Slot (Yellow)</span>' +
+                                        '</div>';
+                                    } else {
+                                        slotHtml += '<div onclick="claimYellowSlot(\'' + loc.id + '\', \'' + shift.id + '\', \'' + typeStr + '\')" class="cursor-pointer bg-amber-500/20 hover:bg-amber-500/30 border-2 border-dashed border-amber-400/60 rounded-xl px-4 py-3 transition-all flex justify-between items-center shadow-[0_0_15px_rgba(245,158,11,0.15)] active:scale-[0.98]">' +
+                                            '<div class="flex items-center gap-3">' +
+                                                '<div class="w-7 h-7 rounded-full bg-amber-500 text-amber-950 flex items-center justify-center font-bold shadow-md">' +
+                                                    '<i class="fa-solid fa-plus text-xs"></i>' +
+                                                '</div>' +
+                                                '<div>' +
+                                                    '<span class="font-bold text-amber-100 text-sm">Available Duty - Tap to Claim</span>' +
+                                                    '<p class="text-[10px] text-amber-300/80">Slot vacated. Put your name here.</p>' +
+                                                '</div>' +
                                             '</div>' +
-                                        '</div>' +
-                                        '<button onclick="saveSlot(\'' + loc.id + '\', \'' + shift.id + '\', \'regular\', ' + r + ')" ' +
-                                            'class="bg-indigo-600 hover:bg-indigo-500 text-white p-2 sm:p-2.5 rounded-xl transition-all shadow-md active:scale-95 flex-shrink-0">' +
-                                            '<i class="fa-solid fa-check"></i>' +
-                                        '</button>' +
-                                    '</div>';
+                                            '<span class="text-xs font-bold text-amber-300 bg-amber-950/60 px-2.5 py-1 rounded-lg border border-amber-500/30">Claim Slot</span>' +
+                                        '</div>';
+                                    }
                                 }
                             }
+                            slotHtml += '</div>';
+                            return slotHtml;
+                        }
+
+                        if (regCap > 0) html += renderSlots(regCap, regBookings, 'REGULAR', 'fa-users', 'indigo');
+                        if (sbyCap > 0) {
+                            html += '<div class="mt-3 pt-4 border-t border-white/5 relative"><span class="absolute -top-2.5 left-4 bg-slate-900 px-2 text-[10px] font-bold uppercase text-amber-500/80"><i class="fa-solid fa-user-shield"></i> Standby Reserve</span>';
+                            html += renderSlots(sbyCap, sbyBookings, 'STANDBY', 'fa-user-shield', 'amber');
                             html += '</div>';
                         }
-
-                        // Standby Slots Render
-                        if (sbyCap > 0) {
-                            html += '<div class="mt-3 sm:mt-4 pt-4 border-t border-white/5 relative">' +
-                                '<span class="absolute -top-2.5 left-3 sm:left-4 bg-slate-900 px-2 text-[9px] sm:text-[10px] font-bold uppercase tracking-wider text-amber-500/80 flex items-center gap-1 rounded-sm">' +
-                                    '<i class="fa-solid fa-user-shield"></i> Standby' +
-                                '</span>' +
-                                '<div class="space-y-2 sm:space-y-3 pt-1 sm:pt-2">';
-
-                            for (var bIdx = 0; bIdx < sbyCap; bIdx++) {
-                                var assignedSby = sbyBookings[bIdx];
-                                if (assignedSby) {
-                                    html += '<div class="flex items-center justify-between bg-amber-500/10 border border-amber-500/20 rounded-xl px-3 sm:px-4 py-2.5 sm:py-3 fade-in">' +
-                                        '<div class="flex items-center gap-2 sm:gap-3">' +
-                                            '<div class="w-5 h-5 sm:w-6 sm:h-6 rounded-full bg-amber-500/20 text-amber-300 flex items-center justify-center">' +
-                                                '<i class="fa-solid fa-user-shield text-xs"></i>' +
-                                            '</div>' +
-                                            '<span class="font-semibold text-amber-100 text-sm">' + escapeHtml(assignedSby.volunteer_name) + '</span>' +
-                                        '</div>' +
-                                        (state.isAdmin ? 
-                                            '<button onclick="clearBooking(\'' + assignedSby.id + '\')" class="text-slate-500 hover:text-red-400 bg-slate-900/50 hover:bg-slate-800 p-1.5 rounded-lg transition-colors"><i class="fa-solid fa-trash-can"></i></button>' : '') +
-                                    '</div>';
-                                } else {
-                                    html += '<div class="flex gap-2 items-center w-full fade-in">' +
-                                        '<div class="relative flex-1">' +
-                                            '<input id="input_' + loc.id + '_' + shift.id + '_backup_' + bIdx + '" type="text" placeholder="Backup name..." ' +
-                                                'class="w-full bg-slate-950/50 border border-amber-500/30 text-white rounded-xl pl-3 sm:pl-4 pr-8 py-2 sm:py-2.5 text-xs sm:text-sm focus:outline-none focus:ring-1 focus:border-amber-500 focus:ring-amber-500/50 placeholder-slate-500 transition-all shadow-inner" ' +
-                                                'onkeydown="if(event.key === \'Enter\') saveSlot(\'' + loc.id + '\', \'' + shift.id + '\', \'standby\', ' + bIdx + ')" />' +
-                                            '<div class="absolute right-3 top-1/2 -translate-y-1/2 text-amber-500/70">' +
-                                                '<i class="fa-solid fa-user-shield text-xs"></i>' +
-                                            '</div>' +
-                                        '</div>' +
-                                        '<button onclick="saveSlot(\'' + loc.id + '\', \'' + shift.id + '\', \'standby\', ' + bIdx + ')" ' +
-                                            'class="bg-amber-600 hover:bg-amber-500 text-white p-2 sm:p-2.5 rounded-xl transition-all shadow-md active:scale-95 flex-shrink-0">' +
-                                            '<i class="fa-solid fa-check"></i>' +
-                                        '</button>' +
-                                    '</div>';
-                                }
-                            }
-                            html += '</div></div>';
-                        }
-
                         html += '</div>';
                     }
                 }
-
                 html += '</div></div>';
             }
 
-            // Admin Add Location Section
             if (state.isAdmin) {
-                html += '<div class="bg-indigo-950/20 border border-indigo-500/30 rounded-2xl sm:rounded-3xl p-4 sm:p-5 flex flex-col">' +
-                    '<h3 class="text-base sm:text-lg font-bold text-indigo-300 mb-4 flex items-center gap-2">' +
-                        '<i class="fa-solid fa-plus"></i> Add Duty Station' +
-                    '</h3>' +
-                    '<form onsubmit="addLocation(event)" class="space-y-3">' +
-                        '<input id="new_loc_name" required placeholder="Station Name (e.g., Marine Drive Center)" class="w-full bg-slate-900/80 border border-white/10 text-white rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500" />' +
-                        '<input id="new_loc_map" placeholder="Google Maps Link URL or Address" class="w-full bg-slate-900/80 border border-white/10 text-white rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500" />' +
-                        '<button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-3 rounded-xl text-sm font-bold transition-all shadow-md mt-2">' +
-                            'Create Station' +
-                        '</button>' +
-                    '</form>' +
-                '</div>';
+                html += '<div class="bg-indigo-950/20 border border-indigo-500/30 rounded-3xl p-5"><h3 class="text-lg font-bold text-indigo-300 mb-4"><i class="fa-solid fa-plus"></i> Add Duty Station</h3><form onsubmit="addLocation(event)" class="space-y-3"><input id="new_loc_name" required placeholder="Station Name (e.g. Marine Drive Center)" class="w-full bg-slate-900/80 border border-white/10 text-white rounded-xl px-4 py-2.5 text-sm" /><input id="new_loc_map" placeholder="Google Maps Link URL or Address" class="w-full bg-slate-900/80 border border-white/10 text-white rounded-xl px-4 py-2.5 text-sm" /><button type="submit" class="w-full bg-indigo-600 text-white px-4 py-3 rounded-xl text-sm font-bold mt-2">Create Station</button></form></div>';
             }
 
             html += '</div></main>';
-
-            // Admin Login Modal
-            if (state.showAdminLogin) {
-                html += '<div class="fixed inset-0 z-50 flex items-center justify-center p-4">' +
-                    '<div class="absolute inset-0 bg-slate-950/80 backdrop-blur-sm" onclick="toggleAdminModal(false)"></div>' +
-                    '<div class="bg-slate-900 border border-white/10 w-full max-w-sm rounded-3xl shadow-2xl relative z-10 p-5 sm:p-6 fade-in">' +
-                        '<div class="flex items-center gap-3 mb-5 text-indigo-400">' +
-                            '<i class="fa-solid fa-shield-halved text-2xl sm:text-3xl"></i>' +
-                            '<h3 class="text-lg sm:text-xl font-bold text-white">Admin Clearance</h3>' +
-                        '</div>' +
-                        '<form onsubmit="handleAdminAuth(event)" class="space-y-4">' +
-                            '<div>' +
-                                '<label class="text-xs sm:text-sm text-slate-400 mb-2 block">Enter Security PIN</label>' +
-                                '<input id="admin_pwd" type="password" placeholder="••••" class="w-full bg-slate-950 border border-white/10 text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500" autofocus />' +
-                                (state.loginError ? '<p class="text-rose-400 text-xs mt-2 font-semibold">Incorrect PIN. Try 9847</p>' : '') +
-                            '</div>' +
-                            '<div class="flex gap-3 pt-2">' +
-                                '<button type="button" onclick="toggleAdminModal(false)" class="flex-1 bg-slate-800 hover:bg-slate-700 text-white py-2.5 sm:py-3 rounded-xl text-sm font-medium transition-colors">Cancel</button>' +
-                                '<button type="submit" class="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white py-2.5 sm:py-3 rounded-xl text-sm font-medium transition-colors">Unlock</button>' +
-                            '</div>' +
-                        '</form>' +
-                    '</div>' +
-                '</div>';
-            }
-
             html += '</div>';
             root.innerHTML = html;
         }
 
-        document.addEventListener('DOMContentLoaded', function() {
-            AppEngine.init();
-        });
+        document.addEventListener('DOMContentLoaded', function() { AppEngine.init(); });
     </script>
 </body>
 </html>
