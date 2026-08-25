@@ -37,8 +37,8 @@
         var CONFIG = {
             SUPABASE_URL: 'https://vffbprsuvrwkzvwnipvg.supabase.co',
             SUPABASE_ANON_KEY: 'sb_publishable_a2RUr35OTMoqN4FRA3aTgg_1kHxmFp1',
-            LOCAL_STORAGE_KEY: 'smpw_kochi_cache_v2',
-            ADMIN_SESSION_KEY: 'smpw_admin_auth_v2',
+            LOCAL_STORAGE_KEY: 'smpw_kochi_cache_v3',
+            ADMIN_SESSION_KEY: 'smpw_admin_auth_v3',
             FALLBACK_PIN: '9847'
         };
 
@@ -68,7 +68,7 @@
         };
 
         // =======================================================================
-        // Date & Helper Utilities (Legacy Compatible - No Breaking ?. Syntax)
+        // Date & Helper Utilities (Legacy Compatible)
         // =======================================================================
         function generateNext30Days() {
             var dates = [];
@@ -109,6 +109,15 @@
                 .replace(/>/g, '&gt;')
                 .replace(/"/g, '&quot;')
                 .replace(/'/g, '&#039;');
+        }
+
+        function formatMapUrl(rawUrl) {
+            if (!rawUrl) return '';
+            var trimmed = rawUrl.trim();
+            if (trimmed.indexOf('http://') === 0 || trimmed.indexOf('https://') === 0) {
+                return trimmed;
+            }
+            return 'https://maps.google.com/?q=' + encodeURIComponent(trimmed);
         }
 
         function sha256(str) {
@@ -183,7 +192,7 @@
         };
 
         // =======================================================================
-        // Database Synchronization Engine (Supabase Realtime)
+        // Synchronization Engine
         // =======================================================================
         var AppEngine = {
             init: function() {
@@ -191,7 +200,6 @@
                 state.selectedDate = state.availableDates[0];
                 state.isAdmin = StorageEngine.isAdminAuth();
 
-                // Hydrate from localStorage for zero-lag instant rendering
                 var cached = StorageEngine.getCache();
                 if (cached && cached.locations && cached.locations.length > 0) {
                     state.locations = cached.locations;
@@ -240,7 +248,6 @@
 
                     StorageEngine.saveCache();
 
-                    // Prevent re-rendering over an input field if user is actively typing
                     var activeTag = document.activeElement ? document.activeElement.tagName : '';
                     if (activeTag !== 'INPUT') {
                         renderApp();
@@ -264,18 +271,10 @@
                     }
 
                     state.realtimeChannel = supabaseClient.channel('kochi-realtime-sync')
-                        .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, function() {
-                            self.syncWithDatabase();
-                        })
-                        .on('postgres_changes', { event: '*', schema: 'public', table: 'schedule_slots' }, function() {
-                            self.syncWithDatabase();
-                        })
-                        .on('postgres_changes', { event: '*', schema: 'public', table: 'locations' }, function() {
-                            self.syncWithDatabase();
-                        })
-                        .on('postgres_changes', { event: '*', schema: 'public', table: 'shifts' }, function() {
-                            self.syncWithDatabase();
-                        })
+                        .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, function() { self.syncWithDatabase(); })
+                        .on('postgres_changes', { event: '*', schema: 'public', table: 'schedule_slots' }, function() { self.syncWithDatabase(); })
+                        .on('postgres_changes', { event: '*', schema: 'public', table: 'locations' }, function() { self.syncWithDatabase(); })
+                        .on('postgres_changes', { event: '*', schema: 'public', table: 'shifts' }, function() { self.syncWithDatabase(); })
                         .subscribe();
                 } catch (e) {}
             },
@@ -336,7 +335,6 @@
             if (targetSlot) {
                 proceedWithBooking(targetSlot.id);
             } else {
-                // Find template capacities
                 var regCap = 2, sbyCap = 1;
                 for (var j = 0; j < state.shifts.length; j++) {
                     if (state.shifts[j].id === shiftId) {
@@ -378,7 +376,80 @@
         };
 
         // =======================================================================
-        // UI & Admin Event Handlers
+        // Dynamic Slot Capacity Modification (Fixed Reg & Backup Counters)
+        // =======================================================================
+        window.updateShiftSlots = function(locationId, shiftId, type, change) {
+            var targetShift = null;
+            for (var i = 0; i < state.shifts.length; i++) {
+                if (state.shifts[i].id === shiftId) {
+                    targetShift = state.shifts[i];
+                    break;
+                }
+            }
+            if (!targetShift) return;
+
+            var currentVal = type === 'slotsCount' ? (targetShift.regular_capacity || 2) : (targetShift.standby_capacity || 1);
+            var newVal = Math.max(0, currentVal + change);
+
+            // Optimistic UI update on Shift template
+            if (type === 'slotsCount') {
+                targetShift.regular_capacity = newVal;
+            } else {
+                targetShift.standby_capacity = newVal;
+            }
+
+            var dateKey = formatDateKey(state.selectedDate);
+            var targetSlot = null;
+            for (var k = 0; k < state.slots.length; k++) {
+                if (state.slots[k].shift_id === shiftId && state.slots[k].slot_date === dateKey) {
+                    targetSlot = state.slots[k];
+                    break;
+                }
+            }
+
+            // Optimistic UI update on active day slot
+            if (targetSlot) {
+                if (type === 'slotsCount') targetSlot.max_regular = newVal;
+                else targetSlot.max_standby = newVal;
+            }
+
+            renderApp(); // Instant visual response
+
+            // 1. Update Shift Template in DB
+            var shiftPayload = {};
+            if (type === 'slotsCount') shiftPayload.regular_capacity = newVal;
+            else shiftPayload.standby_capacity = newVal;
+
+            supabaseClient.from('shifts').update(shiftPayload).eq('id', shiftId).then(function(res) {
+                if (res.error) {
+                    showToast('Database Error: ' + res.error.message, 'error');
+                }
+            });
+
+            // 2. Update or Insert Today's Slot Record in DB
+            if (targetSlot) {
+                var slotPayload = {};
+                if (type === 'slotsCount') slotPayload.max_regular = newVal;
+                else slotPayload.max_standby = newVal;
+
+                supabaseClient.from('schedule_slots').update(slotPayload).eq('id', targetSlot.id).then(function() {
+                    AppEngine.syncWithDatabase();
+                });
+            } else {
+                supabaseClient.from('schedule_slots').insert([{
+                    location_id: locationId,
+                    shift_id: shiftId,
+                    slot_date: dateKey,
+                    max_regular: targetShift.regular_capacity,
+                    max_standby: targetShift.standby_capacity
+                }]).then(function() {
+                    AppEngine.syncWithDatabase();
+                });
+            }
+        };
+
+        // =======================================================================
+        // UI & Admin Handlers
         // =======================================================================
         window.selectDate = function(isoString) {
             state.selectedDate = new Date(isoString);
@@ -435,15 +506,11 @@
             e.preventDefault();
             var name = document.getElementById('new_loc_name').value.trim();
             var mapUrl = document.getElementById('new_loc_map').value.trim();
-            var phone = document.getElementById('new_loc_phone').value.trim();
             if (!name) return;
-
-            var fullAddress = mapUrl;
-            if (phone) fullAddress = (fullAddress ? fullAddress + ' | ' : '') + 'Tel: ' + phone;
 
             supabaseClient.from('locations').insert([{
                 name: name,
-                address: fullAddress,
+                address: mapUrl,
                 is_active: true
             }]).then(function(res) {
                 if (!res.error) {
@@ -471,18 +538,14 @@
         window.saveEditLocation = function(id) {
             var name = document.getElementById('edit_name_' + id).value.trim();
             var mapUrl = document.getElementById('edit_map_' + id).value.trim();
-            var phone = document.getElementById('edit_phone_' + id).value.trim();
-
             if (!name) return;
-            var fullAddress = mapUrl;
-            if (phone) fullAddress = (fullAddress ? fullAddress + ' | ' : '') + 'Tel: ' + phone;
 
             supabaseClient.from('locations').update({
                 name: name,
-                address: fullAddress
+                address: mapUrl
             }).eq('id', id).then(function() {
                 state.editingLocationId = null;
-                showToast('Location updated', 'success');
+                showToast('Location link updated', 'success');
                 AppEngine.syncWithDatabase();
             });
         };
@@ -510,28 +573,6 @@
             });
         };
 
-        window.updateShiftSlots = function(locId, shiftId, type, change) {
-            var targetShift = null;
-            for (var i = 0; i < state.shifts.length; i++) {
-                if (state.shifts[i].id === shiftId) {
-                    targetShift = state.shifts[i];
-                    break;
-                }
-            }
-            if (!targetShift) return;
-
-            var currentVal = type === 'slotsCount' ? (targetShift.regular_capacity || 2) : (targetShift.standby_capacity || 1);
-            var newVal = Math.max(0, currentVal + change);
-
-            var updatePayload = {};
-            if (type === 'slotsCount') updatePayload.regular_capacity = newVal;
-            else updatePayload.standby_capacity = newVal;
-
-            supabaseClient.from('shifts').update(updatePayload).eq('id', shiftId).then(function() {
-                AppEngine.syncWithDatabase();
-            });
-        };
-
         window.deleteShift = function(shiftId) {
             if (!confirm('Delete this duty shift timing?')) return;
             supabaseClient.from('shifts').delete().eq('id', shiftId).then(function() {
@@ -541,7 +582,7 @@
         };
 
         // =======================================================================
-        // Master Render Engine (Matching Your Interface Exactly)
+        // Master Render Engine
         // =======================================================================
         function renderApp() {
             var root = document.getElementById('app-root');
@@ -549,7 +590,6 @@
 
             var activeDateKey = formatDateKey(state.selectedDate);
 
-            // Calculate total bookings for selected date
             var activeDayCount = 0;
             for (var b = 0; b < state.bookings.length; b++) {
                 var bSlotId = state.bookings[b].slot_id;
@@ -633,13 +673,14 @@
                 html += '<div class="col-span-full p-8 text-center bg-slate-900/60 rounded-3xl border border-white/10 text-slate-400">' +
                     '<i class="fa-solid fa-location-dot text-2xl mb-2 text-indigo-400"></i>' +
                     '<p class="text-sm font-semibold">No duty stations configured yet.</p>' +
-                    (state.isAdmin ? '<p class="text-xs text-slate-500 mt-1">Use the "Add New Location" panel below to get started.</p>' : '') +
+                    (state.isAdmin ? '<p class="text-xs text-slate-500 mt-1">Use the "Add New Duty Station" panel below to get started.</p>' : '') +
                 '</div>';
             }
 
             for (var l = 0; l < state.locations.length; l++) {
                 var loc = state.locations[l];
                 var isEditing = state.isAdmin && state.editingLocationId === loc.id;
+                var mapLink = formatMapUrl(loc.address);
 
                 html += '<div class="bg-slate-900/60 backdrop-blur-md border border-white/10 rounded-2xl sm:rounded-3xl overflow-hidden flex flex-col shadow-xl">';
 
@@ -647,8 +688,7 @@
                 if (isEditing) {
                     html += '<div class="p-4 sm:p-5 border-b border-white/5 bg-slate-800/80 flex flex-col gap-3">' +
                         '<input id="edit_name_' + loc.id + '" value="' + escapeHtml(loc.name) + '" placeholder="Location Name" class="w-full bg-slate-950 border border-white/10 text-white rounded-xl px-3 py-2 text-sm focus:ring-1 focus:ring-indigo-500" />' +
-                        '<input id="edit_map_' + loc.id + '" value="' + escapeHtml(loc.address || '') + '" placeholder="Map URL / Address" class="w-full bg-slate-950 border border-white/10 text-white rounded-xl px-3 py-2 text-sm focus:ring-1 focus:ring-indigo-500" />' +
-                        '<input id="edit_phone_' + loc.id + '" placeholder="Contact Phone" class="w-full bg-slate-950 border border-white/10 text-white rounded-xl px-3 py-2 text-sm focus:ring-1 focus:ring-indigo-500" />' +
+                        '<input id="edit_map_' + loc.id + '" value="' + escapeHtml(loc.address || '') + '" placeholder="Google Maps Link URL or Address" class="w-full bg-slate-950 border border-white/10 text-white rounded-xl px-3 py-2 text-sm focus:ring-1 focus:ring-indigo-500" />' +
                         '<div class="flex gap-2 justify-end mt-1">' +
                             '<button onclick="setEditingLocation(null)" class="px-4 py-2 bg-slate-700 text-white rounded-lg text-sm font-medium">Cancel</button>' +
                             '<button onclick="saveEditLocation(\'' + loc.id + '\')" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-medium flex items-center gap-1"><i class="fa-solid fa-floppy-disk"></i> Save</button>' +
@@ -662,7 +702,12 @@
                                 '<span class="break-words">' + escapeHtml(loc.name) + '</span>' +
                             '</h3>' +
                             '<div class="flex flex-wrap items-center gap-2 sm:gap-4 mt-1">' +
-                                (loc.address ? '<span class="bg-slate-900/80 text-xs sm:text-sm text-indigo-300 px-3 py-1.5 rounded-lg flex items-center gap-1.5 border border-white/5 shadow-sm"><i class="fa-solid fa-map"></i> ' + escapeHtml(loc.address) + '</span>' : '') +
+                                (loc.address ? 
+                                    '<a href="' + escapeHtml(mapLink) + '" target="_blank" rel="noopener noreferrer" class="bg-indigo-950/60 hover:bg-indigo-900/60 text-xs sm:text-sm text-indigo-300 hover:text-indigo-100 px-3 py-1.5 rounded-lg flex items-center gap-2 transition-colors border border-indigo-500/30 shadow-sm">' +
+                                        '<i class="fa-solid fa-map-location-dot text-indigo-400"></i>' +
+                                        '<span>Open Location Map</span>' +
+                                        '<i class="fa-solid fa-arrow-up-right-from-square text-[10px] text-indigo-400/70"></i>' +
+                                    '</a>' : '') +
                             '</div>' +
                         '</div>' +
                         (state.isAdmin ? 
@@ -673,7 +718,7 @@
                     '</div>';
                 }
 
-                // Admin Add Shift row
+                // Admin Add Shift
                 if (state.isAdmin && !isEditing) {
                     html += '<div class="bg-slate-950/40 p-3 sm:p-4 border-b border-white/5 flex gap-2">' +
                         '<input id="new_shift_' + loc.id + '" placeholder="New timing (e.g., 08:00 AM - 10:00 AM)" class="flex-1 bg-slate-900 border border-white/10 text-white rounded-xl px-3 py-2 text-xs sm:text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500" />' +
@@ -692,7 +737,6 @@
                     for (var sIdx = 0; sIdx < locShifts.length; sIdx++) {
                         var shift = locShifts[sIdx];
 
-                        // Find slot record for this shift & active date
                         var currentSlot = null;
                         for (var sl = 0; sl < state.slots.length; sl++) {
                             if (state.slots[sl].shift_id === shift.id && state.slots[sl].slot_date === activeDateKey) {
@@ -704,7 +748,6 @@
                         var regCap = currentSlot ? currentSlot.max_regular : (shift.regular_capacity || 2);
                         var sbyCap = currentSlot ? currentSlot.max_standby : (shift.standby_capacity || 1);
 
-                        // Find confirmed bookings
                         var regBookings = [];
                         var sbyBookings = [];
                         if (currentSlot) {
@@ -775,7 +818,7 @@
                             html += '</div>';
                         }
 
-                        // Standby / Backup Slots Render
+                        // Standby Slots Render
                         if (sbyCap > 0) {
                             html += '<div class="mt-3 sm:mt-4 pt-4 border-t border-white/5 relative">' +
                                 '<span class="absolute -top-2.5 left-3 sm:left-4 bg-slate-900 px-2 text-[9px] sm:text-[10px] font-bold uppercase tracking-wider text-amber-500/80 flex items-center gap-1 rounded-sm">' +
@@ -816,11 +859,11 @@
                             html += '</div></div>';
                         }
 
-                        html += '</div>'; // End single shift
+                        html += '</div>';
                     }
                 }
 
-                html += '</div></div>'; // End location container
+                html += '</div></div>';
             }
 
             // Admin Add Location Section
@@ -831,8 +874,7 @@
                     '</h3>' +
                     '<form onsubmit="addLocation(event)" class="space-y-3">' +
                         '<input id="new_loc_name" required placeholder="Station Name (e.g., Marine Drive Center)" class="w-full bg-slate-900/80 border border-white/10 text-white rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500" />' +
-                        '<input id="new_loc_map" placeholder="Address / Location Details (Optional)" class="w-full bg-slate-900/80 border border-white/10 text-white rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500" />' +
-                        '<input id="new_loc_phone" placeholder="Contact Phone (Optional)" class="w-full bg-slate-900/80 border border-white/10 text-white rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500" />' +
+                        '<input id="new_loc_map" placeholder="Google Maps Link URL or Address" class="w-full bg-slate-900/80 border border-white/10 text-white rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500" />' +
                         '<button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-3 rounded-xl text-sm font-bold transition-all shadow-md mt-2">' +
                             'Create Station' +
                         '</button>' +
@@ -870,7 +912,6 @@
             root.innerHTML = html;
         }
 
-        // Initialize App on DOM Load
         document.addEventListener('DOMContentLoaded', function() {
             AppEngine.init();
         });
