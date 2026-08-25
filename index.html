@@ -27,11 +27,14 @@
 
     <script>
         // =======================================================================
-        // Google Apps Script Web App URL - Real-time Sync Connection
+        // Configuration & Database
         // =======================================================================
         const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbykTerz_304LI0WchnOMO_EZjmW_rQ-18tBK3ozyLTENjSX01NcWeB31LIdLlzg2_9q5Q/exec"; 
+        
+        // Change your admin password here. It is hidden from the main UI.
+        const ADMIN_PASSWORD = "admin123"; 
 
-        // --- Default Configurations (Restored all locations) ---
+        // --- Default Configurations ---
         const INITIAL_LOCATIONS = [
             { 
                 id: 'loc_1', 
@@ -110,7 +113,11 @@
             return count;
         };
 
-        // --- Smart Google Sheets Sync Engine ---
+        // =======================================================================
+        // Robust Sync Engine (Fixes disappearing text and refresh loss)
+        // =======================================================================
+        let lastSaveTimestamp = 0; // Tracks when we last wrote to the DB
+
         const syncWithDatabase = async () => {
             if (!GOOGLE_SCRIPT_URL.startsWith('http')) {
                 if (!state.dataLoaded) {
@@ -126,13 +133,19 @@
             state.isSyncing = true;
             
             try {
-                // FIXED: Added cache-buster (?t=...) so devices don't load stale memory
+                // Fetch fresh data (cache-buster ?t= stops devices from serving old memory)
                 const response = await fetch(GOOGLE_SCRIPT_URL + '?t=' + Date.now());
                 const data = await response.json();
                 
-                // Track if data actually changed
+                // CRITICAL FIX: Google Sheets takes 2-4 seconds to save. If we read from the database 
+                // immediately after saving, we will get stale data and wipe out the user's input.
+                // We pause reading for 6 seconds after a local save to let Google catch up.
+                if (Date.now() - lastSaveTimestamp < 6000) {
+                    state.isSyncing = false;
+                    return; 
+                }
+
                 const currentDataHash = JSON.stringify({ l: state.locations, a: state.assignments });
-                
                 let updatedLocs = state.locations;
                 let updatedAssigns = state.assignments;
                 
@@ -148,17 +161,21 @@
 
                 const newDataHash = JSON.stringify({ l: updatedLocs, a: updatedAssigns });
                 
-                // Only trigger update if someone else changed the data
+                // Only trigger visual update if a DIFFERENT user changed the data
                 if (currentDataHash !== newDataHash) {
                     state.locations = updatedLocs;
                     state.assignments = updatedAssigns;
                     state.pendingRender = true;
+                    
+                    // Update Local Storage so refreshes are instantly accurate
+                    localStorage.setItem('smpw_locations', JSON.stringify(updatedLocs));
+                    localStorage.setItem('smpw_assignments', JSON.stringify(updatedAssigns));
                 }
 
                 state.syncError = false;
                 state.dataLoaded = true;
 
-                // FIXED: Never interrupt the user if they are currently typing in an input field
+                // CRITICAL FIX: Do not refresh the screen if the user is currently typing a name!
                 const activeTag = document.activeElement ? document.activeElement.tagName : '';
                 if (state.pendingRender && activeTag !== 'INPUT') {
                     state.pendingRender = false;
@@ -181,9 +198,13 @@
         const postToDatabase = (action, payloadKey, payloadData) => {
             if (!GOOGLE_SCRIPT_URL.startsWith('http')) return;
             
+            lastSaveTimestamp = Date.now(); // Mark the time we started saving
+
+            // Using no-cors prevents the browser from blocking the Google Apps Script redirect
             fetch(GOOGLE_SCRIPT_URL, {
                 method: 'POST',
-                headers: { 'Content-Type': 'text/plain' }, // Avoids CORS strict blocking
+                mode: 'no-cors', 
+                headers: { 'Content-Type': 'text/plain' }, 
                 body: JSON.stringify({
                     action: action,
                     [payloadKey]: payloadData
@@ -193,22 +214,36 @@
 
         const updateAssignments = (newAssigns) => {
             state.assignments = newAssigns;
-            renderApp(); // Instant visual update for the person clicking
+            // Instantly save to local browser memory so a refresh won't kill it
+            localStorage.setItem('smpw_assignments', JSON.stringify(newAssigns));
+            renderApp(); // Instant visual update
             postToDatabase('update_assignments', 'assignments', newAssigns);
         };
 
         const updateLocations = (newLocs) => {
             state.locations = newLocs;
-            renderApp(); // Instant visual update for the person clicking
+            // Instantly save to local browser memory
+            localStorage.setItem('smpw_locations', JSON.stringify(newLocs));
+            renderApp(); // Instant visual update
             postToDatabase('update_locations', 'locations', newLocs);
         };
-
 
         // --- Initialization ---
         state.availableDates = generateNext30Days();
         state.selectedDate = state.availableDates[0];
         
-        // Initial load
+        // CRITICAL FIX: Load from LocalStorage first so the app loads instantly with saved data
+        const savedLocs = localStorage.getItem('smpw_locations');
+        const savedAssigns = localStorage.getItem('smpw_assignments');
+        if (savedLocs) state.locations = JSON.parse(savedLocs);
+        if (savedAssigns) state.assignments = JSON.parse(savedAssigns);
+        
+        if (savedLocs || savedAssigns) {
+            state.dataLoaded = true;
+            renderApp();
+        }
+
+        // Start pulling live database changes
         syncWithDatabase();
         
         // Background polling every 5 seconds for real-time feel
@@ -231,7 +266,7 @@
         window.handleAdminAuth = (e) => {
             e.preventDefault();
             const pwd = document.getElementById('admin_pwd').value;
-            if (pwd === 'admin123') {
+            if (pwd === ADMIN_PASSWORD) {
                 state.isAdmin = true;
                 state.showAdminLogin = false;
                 state.loginError = false;
@@ -349,7 +384,6 @@
                 }));
             }
         };
-
 
         // --- Render Engine ---
         const renderApp = () => {
@@ -668,9 +702,9 @@
                                 </div>
                                 <form onsubmit="handleAdminAuth(event)" class="space-y-4">
                                     <div>
-                                        <label class="text-xs sm:text-sm text-slate-400 mb-2 block">Enter PIN (Demo PIN: admin123)</label>
+                                        <label class="text-xs sm:text-sm text-slate-400 mb-2 block">Enter Admin PIN</label>
                                         <input id="admin_pwd" type="password" placeholder="••••••••" class="w-full bg-slate-950 border border-white/10 text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500" autofocus />
-                                        ${state.loginError ? `<p class="text-red-400 text-xs mt-2">Incorrect PIN. Try 'admin123'.</p>` : ''}
+                                        ${state.loginError ? `<p class="text-red-400 text-xs mt-2">Incorrect PIN.</p>` : ''}
                                     </div>
                                     <div class="flex gap-3 pt-2">
                                         <button type="button" onclick="toggleAdminModal(false)" class="flex-1 bg-slate-800 hover:bg-slate-700 text-white py-2.5 sm:py-3 rounded-xl text-sm font-medium transition-colors">Cancel</button>
