@@ -25,18 +25,7 @@
         </div>
     </div>
 
-    <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-
-        // --- Firebase Initialization ---
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-        const app = initializeApp(firebaseConfig);
-        const auth = getAuth(app);
-        const db = getFirestore(app);
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'smpw-kochi-app';
-
+    <script>
         // --- Default Configurations ---
         const INITIAL_LOCATIONS = [
             { 
@@ -62,7 +51,6 @@
 
         // --- App State ---
         const state = {
-            user: null,
             dataLoaded: false,
             locations: [],
             assignments: {},
@@ -104,64 +92,43 @@
             return count;
         };
 
-        // --- Initialization ---
+        // --- Initialization & Local Storage Sync ---
         state.availableDates = generateNext30Days();
         state.selectedDate = state.availableDates[0];
 
-        const initAuth = async () => {
-            try {
-                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                    await signInWithCustomToken(auth, __initial_auth_token);
-                } else {
-                    await signInAnonymously(auth);
-                }
-            } catch (error) {
-                console.error("Auth Error", error);
+        const loadData = () => {
+            // Load Locations
+            const savedLocations = localStorage.getItem('smpw_locations');
+            if (savedLocations) {
+                state.locations = JSON.parse(savedLocations);
+            } else {
+                state.locations = INITIAL_LOCATIONS;
+                localStorage.setItem('smpw_locations', JSON.stringify(INITIAL_LOCATIONS));
             }
+
+            // Load Assignments
+            const savedAssignments = localStorage.getItem('smpw_assignments');
+            if (savedAssignments) {
+                state.assignments = JSON.parse(savedAssignments);
+            } else {
+                state.assignments = {};
+            }
+
+            state.dataLoaded = true;
+            renderApp();
         };
 
-        initAuth();
+        // --- Data Update Helpers ---
+        const updateAssignments = (newAssigns) => {
+            state.assignments = newAssigns;
+            localStorage.setItem('smpw_assignments', JSON.stringify(newAssigns));
+            renderApp(); 
+        };
 
-        onAuthStateChanged(auth, (user) => {
-            state.user = user;
-            if (user) {
-                setupRealtimeListeners();
-            }
-        });
-
-        const setupRealtimeListeners = () => {
-            const configRef = doc(db, 'artifacts', appId, 'public', 'data', 'smpw_config', 'main');
-            const assignRef = doc(db, 'artifacts', appId, 'public', 'data', 'smpw_assigns', 'main');
-
-            let configLoaded = false;
-            let assignLoaded = false;
-            const checkLoaded = () => { 
-                if (configLoaded && assignLoaded) {
-                    state.dataLoaded = true;
-                    renderApp();
-                }
-            };
-
-            onSnapshot(configRef, (docSnap) => {
-                if (docSnap.exists()) {
-                    state.locations = docSnap.data().locations || [];
-                } else {
-                    setDoc(configRef, { locations: INITIAL_LOCATIONS });
-                    state.locations = INITIAL_LOCATIONS;
-                }
-                configLoaded = true;
-                checkLoaded();
-            }, (err) => console.error(err));
-
-            onSnapshot(assignRef, (docSnap) => {
-                if (docSnap.exists()) {
-                    state.assignments = docSnap.data().assignments || {};
-                } else {
-                    state.assignments = {};
-                }
-                assignLoaded = true;
-                checkLoaded();
-            }, (err) => console.error(err));
+        const updateLocations = (newLocs) => {
+            state.locations = newLocs;
+            localStorage.setItem('smpw_locations', JSON.stringify(newLocs));
+            renderApp(); 
         };
 
         // --- Global Actions (Attached to Window for HTML event handlers) ---
@@ -218,22 +185,6 @@
             if (next[dateKey]?.[locId]?.[shiftId]?.[slotType]) {
                 delete next[dateKey][locId][shiftId][slotType][slotIndex];
                 updateAssignments(next);
-            }
-        };
-
-        const updateAssignments = async (newAssigns) => {
-            state.assignments = newAssigns;
-            renderApp(); // Optimistic update
-            if (state.user) {
-                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'smpw_assigns', 'main'), { assignments: newAssigns });
-            }
-        };
-
-        const updateLocations = async (newLocs) => {
-            state.locations = newLocs;
-            renderApp(); // Optimistic update
-            if (state.user) {
-                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'smpw_config', 'main'), { locations: newLocs });
             }
         };
 
@@ -314,7 +265,6 @@
                 }));
             }
         };
-
 
         // --- Render Engine ---
         const renderApp = () => {
@@ -521,7 +471,8 @@
                                                         <div class="flex gap-2 items-center w-full fade-in">
                                                             <div class="relative flex-1">
                                                                 <input id="input_${location.id}_${shift.id}_regular_${i}" type="text" placeholder="Your name..."
-                                                                    class="w-full bg-slate-950/50 border border-indigo-500/30 text-white rounded-xl pl-3 sm:pl-4 pr-8 py-2 sm:py-2.5 text-xs sm:text-sm focus:outline-none focus:ring-1 focus:border-indigo-500 focus:ring-indigo-500/50 placeholder-slate-500 transition-all shadow-inner" />
+                                                                    class="w-full bg-slate-950/50 border border-indigo-500/30 text-white rounded-xl pl-3 sm:pl-4 pr-8 py-2 sm:py-2.5 text-xs sm:text-sm focus:outline-none focus:ring-1 focus:border-indigo-500 focus:ring-indigo-500/50 placeholder-slate-500 transition-all shadow-inner" 
+                                                                    onkeydown="if(event.key === 'Enter') saveSlot('${activeDateKey}', '${location.id}', '${shift.id}', 'regular', ${i})" />
                                                                 <div class="absolute right-3 top-1/2 -translate-y-1/2 text-indigo-500/70">
                                                                     <i class="fa-solid fa-users text-xs"></i>
                                                                 </div>
@@ -570,7 +521,8 @@
                                                         <div class="flex gap-2 items-center w-full fade-in">
                                                             <div class="relative flex-1">
                                                                 <input id="input_${location.id}_${shift.id}_backup_${i}" type="text" placeholder="Backup name..."
-                                                                    class="w-full bg-slate-950/50 border border-amber-500/30 text-white rounded-xl pl-3 sm:pl-4 pr-8 py-2 sm:py-2.5 text-xs sm:text-sm focus:outline-none focus:ring-1 focus:border-amber-500 focus:ring-amber-500/50 placeholder-slate-500 transition-all shadow-inner" />
+                                                                    class="w-full bg-slate-950/50 border border-amber-500/30 text-white rounded-xl pl-3 sm:pl-4 pr-8 py-2 sm:py-2.5 text-xs sm:text-sm focus:outline-none focus:ring-1 focus:border-amber-500 focus:ring-amber-500/50 placeholder-slate-500 transition-all shadow-inner" 
+                                                                    onkeydown="if(event.key === 'Enter') saveSlot('${activeDateKey}', '${location.id}', '${shift.id}', 'backup', ${i})" />
                                                                 <div class="absolute right-3 top-1/2 -translate-y-1/2 text-amber-500/70">
                                                                     <i class="fa-solid fa-user-shield text-xs"></i>
                                                                 </div>
@@ -640,7 +592,11 @@
             root.innerHTML = html;
         };
 
+        // Start the app
+        loadData();
+
     </script>
 </body>
 </html>
+
 
