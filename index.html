@@ -21,12 +21,17 @@
         <!-- App will be rendered here -->
         <div class="min-h-screen flex flex-col items-center justify-center text-slate-400 gap-4">
             <div class="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
-            Loading Schedule...
+            Connecting to Database...
         </div>
     </div>
 
     <script>
-        // --- Default Configurations ---
+        // =======================================================================
+        // Google Apps Script Web App URL - Real-time Sync Connection
+        // =======================================================================
+        const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbykTerz_304LI0WchnOMO_EZjmW_rQ-18tBK3ozyLTENjSX01NcWeB31LIdLlzg2_9q5Q/exec"; 
+
+        // --- Default Configurations (Fallback if sheet is empty) ---
         const INITIAL_LOCATIONS = [
             { 
                 id: 'loc_1', 
@@ -37,21 +42,14 @@
                     { id: 'sh_1', label: '08:00 AM - 10:00 AM', slotsCount: 2, backupCount: 1 },
                     { id: 'sh_2', label: '10:00 AM - 12:00 PM', slotsCount: 2, backupCount: 1 }
                 ]
-            },
-            { 
-                id: 'loc_2', 
-                name: 'Central Station Entrance', 
-                mapUrl: 'https://maps.google.com/?q=Central+Station+Kochi',
-                phone: '9876543211',
-                shifts: [
-                    { id: 'sh_3', label: '03:00 PM - 05:00 PM', slotsCount: 3, backupCount: 2 }
-                ]
             }
         ];
 
         // --- App State ---
         const state = {
             dataLoaded: false,
+            isSyncing: false,
+            syncError: false,
             locations: [],
             assignments: {},
             availableDates: [],
@@ -92,44 +90,90 @@
             return count;
         };
 
-        // --- Initialization & Local Storage Sync ---
-        state.availableDates = generateNext30Days();
-        state.selectedDate = state.availableDates[0];
-
-        const loadData = () => {
-            // Load Locations
-            const savedLocations = localStorage.getItem('smpw_locations');
-            if (savedLocations) {
-                state.locations = JSON.parse(savedLocations);
-            } else {
-                state.locations = INITIAL_LOCATIONS;
-                localStorage.setItem('smpw_locations', JSON.stringify(INITIAL_LOCATIONS));
+        // --- Google Sheets Sync Engine ---
+        const syncWithDatabase = async () => {
+            if (!GOOGLE_SCRIPT_URL.startsWith('http')) {
+                // Offline fallback if no URL provided yet
+                if (!state.dataLoaded) {
+                    state.locations = INITIAL_LOCATIONS;
+                    state.assignments = {};
+                    state.dataLoaded = true;
+                    renderApp();
+                }
+                return;
             }
 
-            // Load Assignments
-            const savedAssignments = localStorage.getItem('smpw_assignments');
-            if (savedAssignments) {
-                state.assignments = JSON.parse(savedAssignments);
-            } else {
-                state.assignments = {};
-            }
+            if (state.isSyncing) return;
+            state.isSyncing = true;
+            
+            try {
+                const response = await fetch(GOOGLE_SCRIPT_URL);
+                const data = await response.json();
+                
+                // Only update if data exists, otherwise keep defaults
+                if (data.locations && data.locations.length > 0) {
+                    state.locations = data.locations;
+                } else if (!state.dataLoaded) {
+                    state.locations = INITIAL_LOCATIONS;
+                }
+                
+                if (data.assignments) {
+                    state.assignments = data.assignments;
+                }
 
-            state.dataLoaded = true;
-            renderApp();
+                state.syncError = false;
+                state.dataLoaded = true;
+                renderApp();
+            } catch (error) {
+                console.error("Sync error:", error);
+                state.syncError = true;
+                if (!state.dataLoaded) {
+                    state.locations = INITIAL_LOCATIONS;
+                    state.dataLoaded = true;
+                }
+                renderApp();
+            } finally {
+                state.isSyncing = false;
+            }
         };
 
-        // --- Data Update Helpers ---
+        const postToDatabase = (action, payloadKey, payloadData) => {
+            if (!GOOGLE_SCRIPT_URL.startsWith('http')) return;
+            
+            fetch(GOOGLE_SCRIPT_URL, {
+                method: 'POST',
+                // Using text/plain avoids CORS preflight errors with Google Apps Script
+                headers: { 'Content-Type': 'text/plain' },
+                body: JSON.stringify({
+                    action: action,
+                    [payloadKey]: payloadData
+                })
+            }).catch(err => console.error("Save error:", err));
+        };
+
         const updateAssignments = (newAssigns) => {
             state.assignments = newAssigns;
-            localStorage.setItem('smpw_assignments', JSON.stringify(newAssigns));
-            renderApp(); 
+            renderApp(); // Instant visual update
+            postToDatabase('update_assignments', 'assignments', newAssigns);
         };
 
         const updateLocations = (newLocs) => {
             state.locations = newLocs;
-            localStorage.setItem('smpw_locations', JSON.stringify(newLocs));
-            renderApp(); 
+            renderApp(); // Instant visual update
+            postToDatabase('update_locations', 'locations', newLocs);
         };
+
+
+        // --- Initialization ---
+        state.availableDates = generateNext30Days();
+        state.selectedDate = state.availableDates[0];
+        
+        // Initial load
+        syncWithDatabase();
+        
+        // Background polling every 5 seconds for real-time feel
+        setInterval(syncWithDatabase, 5000);
+
 
         // --- Global Actions (Attached to Window for HTML event handlers) ---
         
@@ -266,6 +310,7 @@
             }
         };
 
+
         // --- Render Engine ---
         const renderApp = () => {
             const root = document.getElementById('app-root');
@@ -273,15 +318,23 @@
 
             const activeDateKey = formatDateKey(state.selectedDate);
             const activeDayCount = getShiftCountForDate(activeDateKey);
+            const showSyncWarning = !GOOGLE_SCRIPT_URL.startsWith('http');
 
             let html = `
                 <div class="min-h-screen">
+                    ${showSyncWarning ? `
+                        <div class="bg-amber-500 text-amber-950 text-xs sm:text-sm font-bold text-center p-2">
+                            Database not connected! Add your Google Script URL to enable live sync.
+                        </div>
+                    ` : ''}
+                    
                     <!-- Header -->
                     <header class="sticky top-0 z-30 bg-slate-950/80 backdrop-blur-xl border-b border-white/10 shadow-lg">
                         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 sm:py-4 flex justify-between items-center">
                             <div class="flex items-center gap-2 sm:gap-3">
-                                <div class="bg-indigo-600 p-1.5 sm:p-2 rounded-xl shadow-lg shadow-indigo-600/20 text-white">
+                                <div class="bg-indigo-600 p-1.5 sm:p-2 rounded-xl shadow-lg shadow-indigo-600/20 text-white relative">
                                     <i class="fa-solid fa-calendar text-lg sm:text-xl"></i>
+                                    ${state.isSyncing && !state.syncError ? `<div class="absolute -top-1 -right-1 w-2.5 h-2.5 bg-emerald-400 rounded-full animate-ping"></div>` : ''}
                                 </div>
                                 <h1 class="text-lg sm:text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-indigo-200 tracking-tight">
                                     SMPW Kochi
@@ -591,9 +644,6 @@
             `;
             root.innerHTML = html;
         };
-
-        // Start the app
-        loadData();
 
     </script>
 </body>
