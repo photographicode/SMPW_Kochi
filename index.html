@@ -2,385 +2,824 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SMPW Kochi Scheduler</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>SMPW Kochi - Duty Scheduling & Slot Management System</title>
+    <!-- Tailwind CSS Engine CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Supabase JS Client UMD Bundle CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <style>
-        .hide-scrollbar::-webkit-scrollbar { display: none; }
-        .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-        .fade-in { animation: fadeIn 0.2s ease-in-out; }
-        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        .touch-manipulation { touch-action: manipulation; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #f1f5f9; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
     </style>
 </head>
-<body class="bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950/40 text-slate-200 font-sans selection:bg-indigo-500/30 antialiased">
+<body class="bg-slate-50 text-slate-900 min-h-screen flex flex-col font-sans antialiased touch-manipulation">
 
-    <div id="app-root">
-        <div class="min-h-screen flex flex-col items-center justify-center text-slate-400 gap-4">
-            <div class="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
-            Connecting to Database...
+    <!-- Top Navigation & System Status Bar -->
+    <header class="bg-indigo-900 text-white shadow-md sticky top-0 z-40">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+            <div class="flex items-center space-x-3">
+                <div class="h-9 w-9 rounded-lg bg-indigo-600 flex items-center justify-center font-bold text-lg text-white shadow-inner">
+                    SK
+                </div>
+                <div>
+                    <h1 class="font-bold text-base sm:text-lg leading-tight">SMPW Kochi</h1>
+                    <p class="text-xs text-indigo-200">Real-Time Scheduling Portal</p>
+                </div>
+            </div>
+            
+            <div class="flex items-center space-x-2 sm:space-x-4">
+                <!-- Real-Time Sync Indicator -->
+                <div id="connection-badge" class="flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-indigo-800 text-indigo-200 border border-indigo-700">
+                    <span id="connection-dot" class="h-2 w-2 rounded-full bg-amber-400 animate-pulse"></span>
+                    <span id="connection-text" class="hidden sm:inline">Connecting</span>
+                </div>
+
+                <!-- Admin Action Button -->
+                <button id="admin-toggle-btn" onclick="UIController.promptAdminLogin()" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-800 hover:bg-indigo-700 text-indigo-100 border border-indigo-600 transition-colors">
+                    Admin Portal
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Global Notification Banner -->
+    <div id="toast-container" class="fixed bottom-4 right-4 z-50 flex flex-col space-y-2 max-w-sm w-full px-4 pointer-events-none"></div>
+
+    <!-- Main Content Container -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-1 w-full">
+        
+        <!-- Controls & Date Selection Bar -->
+        <section class="bg-white rounded-xl shadow-sm border border-slate-200 p-4 mb-6">
+            <div class="grid grid-cols-1 sm:grid-cols-12 gap-4 items-center">
+                <div class="sm:col-span-5">
+                    <label for="date-selector" class="block text-xs font-bold uppercase text-slate-500 mb-1">Select Schedule Date</label>
+                    <input type="date" id="date-selector" class="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-sm font-semibold text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:outline-none" onchange="AppEngine.handleDateChange(this.value)">
+                </div>
+                
+                <div class="sm:col-span-7 flex flex-wrap items-center justify-start sm:justify-end gap-2 pt-2 sm:pt-0">
+                    <div class="flex items-center space-x-1.5 text-xs font-medium text-slate-600 bg-slate-100 px-3 py-1.5 rounded-lg">
+                        <span class="h-3 w-3 rounded-full bg-emerald-500 inline-block"></span>
+                        <span>Available Regular</span>
+                    </div>
+                    <div class="flex items-center space-x-1.5 text-xs font-medium text-slate-600 bg-slate-100 px-3 py-1.5 rounded-lg">
+                        <span class="h-3 w-3 rounded-full bg-amber-500 inline-block"></span>
+                        <span>Standby/Backup</span>
+                    </div>
+                    <div class="flex items-center space-x-1.5 text-xs font-medium text-slate-600 bg-slate-100 px-3 py-1.5 rounded-lg">
+                        <span class="h-3 w-3 rounded-full bg-slate-400 inline-block"></span>
+                        <span>Fully Booked</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Admin Management Panel (Hidden by Default) -->
+        <section id="admin-panel" class="hidden bg-slate-900 text-white rounded-xl shadow-lg border border-slate-800 p-5 mb-6">
+            <div class="flex flex-wrap items-center justify-between border-b border-slate-800 pb-4 mb-4 gap-2">
+                <div>
+                    <h2 class="text-base font-bold text-white flex items-center gap-2">
+                        <span class="h-2.5 w-2.5 rounded-full bg-indigo-400"></span>
+                        Administrative Operations
+                    </h2>
+                    <p class="text-xs text-slate-400">Manage shift parameters, duty locations, and capacity thresholds</p>
+                </div>
+                <button onclick="UIController.logoutAdmin()" class="px-3 py-1 rounded text-xs font-semibold bg-rose-600 hover:bg-rose-500 text-white transition-colors">
+                    Lock Admin Session
+                </button>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <!-- Add Location Form -->
+                <div class="bg-slate-800/60 p-4 rounded-lg border border-slate-700/60">
+                    <h3 class="text-xs font-bold uppercase tracking-wider text-indigo-300 mb-3">Add Duty Location</h3>
+                    <div class="space-y-3">
+                        <input type="text" id="admin-loc-name" placeholder="Location Name (e.g., Marine Drive Center)" class="w-full bg-slate-900 border border-slate-700 rounded px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500">
+                        <input type="text" id="admin-loc-address" placeholder="Address / Zone Details" class="w-full bg-slate-900 border border-slate-700 rounded px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500">
+                        <button onclick="AdminEngine.createLocation()" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-1.5 rounded text-xs transition-colors">
+                            Save Location
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Add Shift Template Form -->
+                <div class="bg-slate-800/60 p-4 rounded-lg border border-slate-700/60">
+                    <h3 class="text-xs font-bold uppercase tracking-wider text-indigo-300 mb-3">Configure Shift Timing</h3>
+                    <div class="space-y-3">
+                        <select id="admin-shift-loc" class="w-full bg-slate-900 border border-slate-700 rounded px-3 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500"></select>
+                        <input type="text" id="admin-shift-name" placeholder="Shift Name (e.g., Morning Alpha)" class="w-full bg-slate-900 border border-slate-700 rounded px-3 py-1.5 text-xs text-white placeholder-slate-500">
+                        <div class="grid grid-cols-2 gap-2">
+                            <div>
+                                <label class="block text-[10px] text-slate-400 mb-0.5">Start Time</label>
+                                <input type="time" id="admin-shift-start" class="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-white">
+                            </div>
+                            <div>
+                                <label class="block text-[10px] text-slate-400 mb-0.5">End Time</label>
+                                <input type="time" id="admin-shift-end" class="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-white">
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-2 gap-2">
+                            <div>
+                                <label class="block text-[10px] text-slate-400 mb-0.5">Regular Slots</label>
+                                <input type="number" id="admin-shift-reg" value="2" min="1" class="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-white">
+                            </div>
+                            <div>
+                                <label class="block text-[10px] text-slate-400 mb-0.5">Standby Slots</label>
+                                <input type="number" id="admin-shift-sby" value="1" min="0" class="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-white">
+                            </div>
+                        </div>
+                        <button onclick="AdminEngine.createShift()" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-1.5 rounded text-xs transition-colors">
+                            Establish Shift Template
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Dynamic Grid Container -->
+        <section id="schedule-grid" class="space-y-6">
+            <div class="flex items-center justify-center p-12 bg-white rounded-xl border border-slate-200">
+                <div class="text-center">
+                    <div class="h-8 w-8 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mx-auto mb-3"></div>
+                    <p class="text-xs font-semibold text-slate-500">Initializing synchronization engine...</p>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Modal Booking Confirmation Sheet -->
+    <div id="booking-modal" class="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm hidden flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-100 transform transition-all">
+            <div class="flex justify-between items-start mb-4">
+                <div>
+                    <h3 class="font-bold text-lg text-slate-900" id="modal-title">Confirm Duty Reservation</h3>
+                    <p class="text-xs text-slate-500 mt-0.5" id="modal-subtitle">SMPW Kochi Operational Schedule</p>
+                </div>
+                <button onclick="UIController.closeModal()" class="text-slate-400 hover:text-slate-600 p-1 rounded-lg">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+            </div>
+
+            <form id="booking-form" onsubmit="AppEngine.submitBooking(event)" class="space-y-4">
+                <input type="hidden" id="modal-slot-id">
+                <input type="hidden" id="modal-booking-type">
+
+                <div class="bg-indigo-50 rounded-lg p-3 border border-indigo-100 text-xs text-indigo-900 space-y-1">
+                    <p id="modal-location-text"><span class="font-bold">Location:</span> --</p>
+                    <p id="modal-time-text"><span class="font-bold">Time:</span> --</p>
+                    <p id="modal-type-text"><span class="font-bold">Slot Type:</span> --</p>
+                </div>
+
+                <div>
+                    <label for="volunteer-name" class="block text-xs font-bold uppercase text-slate-600 mb-1">Full Name</label>
+                    <input type="text" id="volunteer-name" required placeholder="Enter complete legal name" class="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-sm text-slate-900 focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+                </div>
+
+                <div>
+                    <label for="volunteer-phone" class="block text-xs font-bold uppercase text-slate-600 mb-1">Phone Number (Kochi / Kerala)</label>
+                    <input type="tel" id="volunteer-phone" required placeholder="e.g., 9847012345" class="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-sm text-slate-900 focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+                </div>
+
+                <div class="pt-2 flex space-x-3">
+                    <button type="button" onclick="UIController.closeModal()" class="w-1/2 py-2.5 rounded-lg border border-slate-300 text-slate-700 font-semibold text-xs hover:bg-slate-50 transition-colors">
+                        Cancel
+                    </button>
+                    <button type="submit" id="modal-submit-btn" class="w-1/2 py-2.5 rounded-lg bg-indigo-600 text-white font-semibold text-xs hover:bg-indigo-700 transition-colors shadow-sm">
+                        Confirm Assignment
+                    </button>
+                </div>
+            </form>
         </div>
     </div>
 
+    <!-- Application Script Block (Legacy-Compatible JS Syntax) -->
     <script>
-        // =======================================================================
-        // Configuration
-        // =======================================================================
-        const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbykTerz_304LI0WchnOMO_EZjmW_rQ-18tBK3ozyLTENjSX01NcWeB31LIdLlzg2_9q5Q/exec"; 
-        const ADMIN_PASSWORD = "admin123"; 
+        /**
+         * Configuration & Environment Variables
+         * Supabase credentials targeting production project instance.
+         */
+        var CONFIG = {
+            SUPABASE_URL: 'https://vffbprsuvrwkzvwnipvg.supabase.co',
+            SUPABASE_ANON_KEY: 'sb_publishable_a2RUr35OTMoqN4FRA3aTgg_1kHxmFp1',
+            LOCAL_STORAGE_KEY: 'smpw_kochi_schedule_cache_v1',
+            ADMIN_SESSION_KEY: 'smpw_admin_session_auth'
+        };
 
-        const INITIAL_LOCATIONS = [
-            { 
-                id: 'loc_1', 
-                name: 'City Square Plaza', 
-                mapUrl: 'https://maps.google.com/?q=City+Square+Plaza+Kochi',
-                phone: '9876543210',
-                shifts: [
-                    { id: 'sh_1', label: '08:00 AM - 10:00 AM', slotsCount: 2, backupCount: 1 },
-                    { id: 'sh_2', label: '10:00 AM - 12:00 PM', slotsCount: 2, backupCount: 1 }
-                ]
+        // Initialize Supabase Client via Global CDN Instance
+        var supabaseClient = null;
+        if (window.supabase && typeof window.supabase.createClient === 'function') {
+            supabaseClient = window.supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
+        }
+
+        /**
+         * Offline-First Storage Engine
+         */
+        var StorageEngine = {
+            getCache: function() {
+                try {
+                    var data = localStorage.getItem(CONFIG.LOCAL_STORAGE_KEY);
+                    return data ? JSON.parse(data) : { locations: [], shifts: [], slots: [], bookings: [] };
+                } catch (e) {
+                    console.warn('LocalStorage read exception:', e);
+                    return { locations: [], shifts: [], slots: [], bookings: [] };
+                }
             },
-            { 
-                id: 'loc_2', 
-                name: 'Central Station Entrance', 
-                mapUrl: 'https://maps.google.com/?q=Central+Station+Kochi',
-                phone: '9876543211',
-                shifts: [
-                    { id: 'sh_3', label: '03:00 PM - 05:00 PM', slotsCount: 3, backupCount: 2 }
-                ]
+            saveCache: function(stateObj) {
+                try {
+                    localStorage.setItem(CONFIG.LOCAL_STORAGE_KEY, JSON.stringify(stateObj));
+                } catch (e) {
+                    console.warn('LocalStorage write exception:', e);
+                }
             },
-            { 
-                id: 'loc_3', 
-                name: 'Grand Shopping Mall', 
-                mapUrl: 'https://maps.google.com/?q=Shopping+Mall+Kochi',
-                phone: '9876543212',
-                shifts: [
-                    { id: 'sh_4', label: '10:00 AM - 01:00 PM', slotsCount: 2, backupCount: 1 },
-                    { id: 'sh_5', label: '04:00 PM - 07:00 PM', slotsCount: 2, backupCount: 1 }
-                ]
-            }
-        ];
-
-        const state = {
-            dataLoaded: false,
-            isSyncing: false,
-            pendingRender: false,
-            locations: [],
-            assignments: {},
-            availableDates: [],
-            selectedDate: null,
-            isAdmin: false,
-            showAdminLogin: false,
-            loginError: false,
-            editingLocationId: null
-        };
-
-        const generateId = () => 'id_' + Math.random().toString(36).substr(2, 9);
-        const generateNext30Days = () => Array.from({length: 30}, (_, i) => { let d = new Date(); d.setDate(d.getDate() + i); return d; });
-        const formatDateKey = (date) => date.toISOString().split('T')[0];
-        const formatDisplayDate = (date) => date.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
-        const formatShortDate = (date) => date.toLocaleDateString('en-US', { weekday: 'short' });
-        const formatMonth = (date) => date.toLocaleDateString('en-US', { month: 'short' });
-
-        const getShiftCountForDate = (dateKey) => {
-            const dayData = state.assignments[dateKey] || {};
-            let count = 0;
-            Object.values(dayData).forEach(loc => Object.values(loc || {}).forEach(shift => {
-                if (shift?.regular) count += Object.keys(shift.regular).length;
-                if (shift?.backup) count += Object.keys(shift.backup).length;
-            }));
-            return count;
-        };
-
-        // =======================================================================
-        // BULLETPROOF SYNC ENGINE
-        // =======================================================================
-        let lastSaveTimestamp = 0; 
-
-        const syncWithDatabase = async () => {
-            if (state.isSyncing) return;
-            state.isSyncing = true;
-            
-            try {
-                const response = await fetch(GOOGLE_SCRIPT_URL + '?t=' + Date.now());
-                const data = await response.json();
-                
-                if (Date.now() - lastSaveTimestamp < 6000) { state.isSyncing = false; return; }
-
-                const currentDataHash = JSON.stringify({ l: state.locations, a: state.assignments });
-                let updatedLocs = data.locations?.length > 0 ? data.locations : (state.dataLoaded ? state.locations : INITIAL_LOCATIONS);
-                let updatedAssigns = data.assignments || state.assignments;
-                
-                // If database is completely empty upon first load, push defaults instantly
-                if (!data.locations || data.locations.length === 0) {
-                    postToDatabase('update_locations', 'locations', INITIAL_LOCATIONS);
+            isAdminAuthenticated: function() {
+                try {
+                    return sessionStorage.getItem(CONFIG.ADMIN_SESSION_KEY) === 'true';
+                } catch (e) {
+                    return false;
                 }
-
-                if (currentDataHash !== JSON.stringify({ l: updatedLocs, a: updatedAssigns })) {
-                    state.locations = updatedLocs;
-                    state.assignments = updatedAssigns;
-                    state.pendingRender = true;
-                    localStorage.setItem('smpw_locations', JSON.stringify(updatedLocs));
-                    localStorage.setItem('smpw_assignments', JSON.stringify(updatedAssigns));
-                }
-
-                state.dataLoaded = true;
-
-                if (state.pendingRender && (!document.activeElement || document.activeElement.tagName !== 'INPUT')) {
-                    state.pendingRender = false;
-                    renderApp();
-                }
-
-            } catch (error) {
-                if (!state.dataLoaded) {
-                    state.locations = INITIAL_LOCATIONS;
-                    state.dataLoaded = true;
-                    renderApp();
-                }
-            } finally {
-                state.isSyncing = false;
+            },
+            setAdminSession: function(status) {
+                try {
+                    if (status) {
+                        sessionStorage.setItem(CONFIG.ADMIN_SESSION_KEY, 'true');
+                    } else {
+                        sessionStorage.removeItem(CONFIG.ADMIN_SESSION_KEY);
+                    }
+                } catch (e) {}
             }
         };
 
-        const postToDatabase = (action, payloadKey, payloadData) => {
-            lastSaveTimestamp = Date.now(); 
-
-            // ULTIMATE FIX: mode 'no-cors' forces the browser to send data without checking security permissions
-            fetch(GOOGLE_SCRIPT_URL, {
-                method: 'POST',
-                mode: 'no-cors',
-                headers: { 'Content-Type': 'text/plain' },
-                body: JSON.stringify({ action: action, [payloadKey]: payloadData })
-            }).catch(err => console.error("Save error:", err));
-        };
-
-        const updateAssignments = (newAssigns) => {
-            state.assignments = newAssigns;
-            localStorage.setItem('smpw_assignments', JSON.stringify(newAssigns));
-            renderApp(); 
-            postToDatabase('update_assignments', 'assignments', newAssigns);
-        };
-
-        const updateLocations = (newLocs) => {
-            state.locations = newLocs;
-            localStorage.setItem('smpw_locations', JSON.stringify(newLocs));
-            renderApp(); 
-            postToDatabase('update_locations', 'locations', newLocs);
-        };
-
-        // --- Init ---
-        state.availableDates = generateNext30Days();
-        state.selectedDate = state.availableDates[0];
-        
-        try {
-            const savedLocs = localStorage.getItem('smpw_locations');
-            const savedAssigns = localStorage.getItem('smpw_assignments');
-            if (savedLocs) state.locations = JSON.parse(savedLocs);
-            if (savedAssigns) state.assignments = JSON.parse(savedAssigns);
-            if (state.locations?.length > 0) { state.dataLoaded = true; renderApp(); }
-        } catch (e) { localStorage.clear(); }
-
-        syncWithDatabase();
-        setInterval(syncWithDatabase, 5000);
-        setTimeout(() => { if (!state.dataLoaded) { state.dataLoaded = true; state.locations = INITIAL_LOCATIONS; renderApp(); } }, 4000);
-
-        // --- Window Actions ---
-        window.selectDate = (d) => { state.selectedDate = new Date(d); renderApp(); };
-        window.toggleAdminModal = (s) => { state.showAdminLogin = s; state.loginError = false; renderApp(); };
-        window.handleAdminAuth = (e) => {
-            e.preventDefault();
-            if (document.getElementById('admin_pwd').value === ADMIN_PASSWORD) { state.isAdmin = true; state.showAdminLogin = false; state.loginError = false; } 
-            else { state.loginError = true; }
-            renderApp();
-        };
-        window.logoutAdmin = () => { state.isAdmin = false; state.editingLocationId = null; renderApp(); };
-
-        window.saveSlot = (dateKey, locId, shiftId, slotType, slotIndex) => {
-            const userName = document.getElementById(`input_${locId}_${shiftId}_${slotType}_${slotIndex}`).value.trim();
-            if (!userName) return;
-            const next = JSON.parse(JSON.stringify(state.assignments));
-            if (!next[dateKey]) next[dateKey] = {};
-            if (!next[dateKey][locId]) next[dateKey][locId] = {};
-            if (!next[dateKey][locId][shiftId]) next[dateKey][locId][shiftId] = { regular: {}, backup: {} };
-            if (!next[dateKey][locId][shiftId][slotType]) next[dateKey][locId][shiftId][slotType] = {};
-            next[dateKey][locId][shiftId][slotType][slotIndex] = userName;
-            updateAssignments(next);
-        };
-
-        window.clearSlot = (dateKey, locId, shiftId, slotType, slotIndex) => {
-            if (!state.isAdmin) return;
-            const next = JSON.parse(JSON.stringify(state.assignments));
-            if (next[dateKey]?.[locId]?.[shiftId]?.[slotType]) {
-                delete next[dateKey][locId][shiftId][slotType][slotIndex];
-                updateAssignments(next);
+        /**
+         * Cryptographic Hashing Helper (SHA-256)
+         */
+        var SecurityEngine = {
+            sha256: function(str) {
+                var buffer = new TextEncoder('utf-8').encode(str);
+                return crypto.subtle.digest('SHA-256', buffer).then(function(hashBuffer) {
+                    var hashArray = Array.from(new Uint8Array(hashBuffer));
+                    return hashArray.map(function(b) {
+                        return ('00' + b.toString(16)).slice(-2);
+                    }).join('');
+                });
             }
         };
 
-        window.addLocation = (e) => {
-            e.preventDefault();
-            const name = document.getElementById('new_loc_name').value.trim();
-            if (!name) return;
-            updateLocations([...state.locations, { id: generateId(), name, mapUrl: document.getElementById('new_loc_map').value.trim(), phone: document.getElementById('new_loc_phone').value.trim(), shifts: [] }]);
+        /**
+         * Application State Controller & Realtime Engine
+         */
+        var AppEngine = {
+            state: {
+                selectedDate: new Date().toISOString().split('T')[0],
+                locations: [],
+                shifts: [],
+                slots: [],
+                bookings: [],
+                realtimeChannel: null
+            },
+
+            init: function() {
+                var dateInput = document.getElementById('date-selector');
+                if (dateInput) {
+                    dateInput.value = this.state.selectedDate;
+                }
+
+                // Hydrate from Offline Storage Cache
+                var cached = StorageEngine.getCache();
+                if (cached && cached.locations && cached.locations.length > 0) {
+                    this.state.locations = cached.locations;
+                    this.state.shifts = cached.shifts;
+                    this.state.slots = cached.slots;
+                    this.state.bookings = cached.bookings;
+                    UIController.renderGrid();
+                }
+
+                if (StorageEngine.isAdminAuthenticated()) {
+                    UIController.showAdminPanel();
+                }
+
+                this.syncNetworkState();
+                this.setupRealtimeSubscription();
+                this.setupVisibilityLifecycle();
+            },
+
+            handleDateChange: function(newDate) {
+                if (!newDate) return;
+                this.state.selectedDate = newDate;
+                this.syncNetworkState();
+            },
+
+            syncNetworkState: function() {
+                if (!supabaseClient) {
+                    UIController.updateStatusBadge('offline', 'Local Cache Only');
+                    return;
+                }
+
+                var self = this;
+                UIController.updateStatusBadge('syncing', 'Synchronizing');
+
+                Promise.all([
+                    supabaseClient.from('locations').select('*').eq('is_active', true).order('display_order'),
+                    supabaseClient.from('shifts').select('*').eq('is_active', true),
+                    supabaseClient.from('schedule_slots').select('*').eq('slot_date', self.state.selectedDate),
+                    supabaseClient.from('bookings').select('*').eq('status', 'CONFIRMED')
+                ]).then(function(results) {
+                    var locRes = results[0];
+                    var shiftRes = results[1];
+                    var slotRes = results[2];
+                    var bookRes = results[3];
+
+                    if (!locRes.error && locRes.data) self.state.locations = locRes.data;
+                    if (!shiftRes.error && shiftRes.data) self.state.shifts = shiftRes.data;
+                    if (!slotRes.error && slotRes.data) self.state.slots = slotRes.data;
+                    if (!bookRes.error && bookRes.data) self.state.bookings = bookRes.data;
+
+                    StorageEngine.saveCache({
+                        locations: self.state.locations,
+                        shifts: self.state.shifts,
+                        slots: self.state.slots,
+                        bookings: self.state.bookings
+                    });
+
+                    UIController.renderGrid();
+                    UIController.updateAdminShiftLocationDropdown();
+                    UIController.updateStatusBadge('connected', 'Live System Active');
+                }).catch(function(err) {
+                    console.error('Data synchronization failure:', err);
+                    UIController.updateStatusBadge('offline', 'Sync Error (Offline)');
+                    UIController.renderGrid();
+                });
+            },
+
+            setupRealtimeSubscription: function() {
+                if (!supabaseClient) return;
+                var self = this;
+
+                try {
+                    if (this.state.realtimeChannel) {
+                        supabaseClient.removeChannel(this.state.realtimeChannel);
+                    }
+
+                    this.state.realtimeChannel = supabaseClient.channel('schema-db-changes')
+                        .on('postgres_changes', { event: '*', schema: 'public', table: 'schedule_slots' }, function(payload) {
+                            self.handleSlotChange(payload);
+                        })
+                        .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, function(payload) {
+                            self.handleBookingChange(payload);
+                        })
+                        .on('postgres_changes', { event: '*', schema: 'public', table: 'locations' }, function() {
+                            self.syncNetworkState();
+                        })
+                        .on('postgres_changes', { event: '*', schema: 'public', table: 'shifts' }, function() {
+                            self.syncNetworkState();
+                        })
+                        .subscribe(function(status) {
+                            if (status === 'SUBSCRIBED') {
+                                UIController.updateStatusBadge('connected', 'Live WebSocket Active');
+                            } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
+                                UIController.updateStatusBadge('offline', 'Disconnected');
+                            }
+                        });
+                } catch (e) {
+                    console.warn('Realtime subscription exception:', e);
+                }
+            },
+
+            setupVisibilityLifecycle: function() {
+                var self = this;
+                document.addEventListener('visibilitychange', function() {
+                    if (document.visibilityState === 'visible') {
+                        self.syncNetworkState();
+                        self.setupRealtimeSubscription();
+                    } else {
+                        if (supabaseClient && self.state.realtimeChannel) {
+                            supabaseClient.removeChannel(self.state.realtimeChannel);
+                            self.state.realtimeChannel = null;
+                        }
+                    }
+                });
+            },
+
+            handleSlotChange: function(payload) {
+                var eventType = payload.eventType;
+                var newRecord = payload.new;
+                var oldRecord = payload.old;
+
+                if (eventType === 'INSERT' || eventType === 'UPDATE') {
+                    if (newRecord.slot_date === this.state.selectedDate) {
+                        var index = -1;
+                        for (var i = 0; i < this.state.slots.length; i++) {
+                            if (this.state.slots[i].id === newRecord.id) {
+                                index = i;
+                                break;
+                            }
+                        }
+                        if (index > -1) {
+                            this.state.slots[index] = newRecord;
+                        } else {
+                            this.state.slots.push(newRecord);
+                        }
+                        UIController.renderGrid();
+                    }
+                } else if (eventType === 'DELETE') {
+                    this.state.slots = this.state.slots.filter(function(s) {
+                        return s.id !== oldRecord.id;
+                    });
+                    UIController.renderGrid();
+                }
+            },
+
+            handleBookingChange: function(payload) {
+                var eventType = payload.eventType;
+                var newRecord = payload.new;
+
+                if (eventType === 'INSERT') {
+                    this.state.bookings.push(newRecord);
+                    UIController.renderGrid();
+                } else if (eventType === 'UPDATE' || eventType === 'DELETE') {
+                    this.syncNetworkState();
+                }
+            },
+
+            submitBooking: function(event) {
+                event.preventDefault();
+                var slotId = document.getElementById('modal-slot-id').value;
+                var bookingType = document.getElementById('modal-booking-type').value;
+                var nameInput = document.getElementById('volunteer-name');
+                var phoneInput = document.getElementById('volunteer-phone');
+                var submitBtn = document.getElementById('modal-submit-btn');
+
+                var name = nameInput ? nameInput.value.trim() : '';
+                var phone = phoneInput ? phoneInput.value.trim() : '';
+
+                if (!name || !phone) {
+                    UIController.showToast('Please enter full contact details', 'error');
+                    return;
+                }
+
+                submitBtn.disabled = true;
+                submitBtn.innerText = 'Processing...';
+
+                supabaseClient.rpc('claim_slot_atomic', {
+                    p_slot_id: slotId,
+                    p_volunteer_name: name,
+                    p_volunteer_phone: phone,
+                    p_booking_type: bookingType
+                }).then(function(response) {
+                    submitBtn.disabled = false;
+                    submitBtn.innerText = 'Confirm Assignment';
+
+                    var data = response.data;
+                    var error = response.error;
+
+                    if (error) {
+                        UIController.showToast('Transaction Error: ' + error.message, 'error');
+                        return;
+                    }
+
+                    if (data && data.success) {
+                        UIController.showToast('Success: ' + data.message, 'success');
+                        UIController.closeModal();
+                        AppEngine.syncNetworkState();
+                    } else {
+                        var msg = data && data.message ? data.message : 'Slot reservation rejected';
+                        UIController.showToast(msg, 'error');
+                    }
+                }).catch(function() {
+                    submitBtn.disabled = false;
+                    submitBtn.innerText = 'Confirm Assignment';
+                    UIController.showToast('Network fault executing claim', 'error');
+                });
+            }
         };
 
-        window.deleteLocation = (id) => { if (confirm('Delete entire location?')) updateLocations(state.locations.filter(loc => loc.id !== id)); };
-        window.setEditingLocation = (id) => { state.editingLocationId = id; renderApp(); };
-        window.saveEditLocation = (id) => {
-            const name = document.getElementById(`edit_name_${id}`).value.trim();
-            if (!name) return;
-            updateLocations(state.locations.map(loc => loc.id === id ? { ...loc, name, mapUrl: document.getElementById(`edit_map_${id}`).value.trim(), phone: document.getElementById(`edit_phone_${id}`).value.trim() } : loc));
-            state.editingLocationId = null;
+        /**
+         * Administrative Function Engine
+         */
+        var AdminEngine = {
+            createLocation: function() {
+                var nameEl = document.getElementById('admin-loc-name');
+                var addrEl = document.getElementById('admin-loc-address');
+                var name = nameEl ? nameEl.value.trim() : '';
+                var address = addrEl ? addrEl.value.trim() : '';
+
+                if (!name) {
+                    UIController.showToast('Location name is required', 'error');
+                    return;
+                }
+
+                supabaseClient.from('locations').insert([{
+                    name: name,
+                    address: address,
+                    is_active: true
+                }]).then(function(res) {
+                    if (res.error) {
+                        UIController.showToast('Error creating location: ' + res.error.message, 'error');
+                    } else {
+                        UIController.showToast('Location configured successfully', 'success');
+                        nameEl.value = '';
+                        addrEl.value = '';
+                        AppEngine.syncNetworkState();
+                    }
+                });
+            },
+
+            createShift: function() {
+                var locEl = document.getElementById('admin-shift-loc');
+                var nameEl = document.getElementById('admin-shift-name');
+                var startEl = document.getElementById('admin-shift-start');
+                var endEl = document.getElementById('admin-shift-end');
+                var regEl = document.getElementById('admin-shift-reg');
+                var sbyEl = document.getElementById('admin-shift-sby');
+
+                var locationId = locEl ? locEl.value : '';
+                var name = nameEl ? nameEl.value.trim() : '';
+                var start = startEl ? startEl.value : '';
+                var end = endEl ? endEl.value : '';
+                var reg = regEl ? parseInt(regEl.value, 10) : 1;
+                var sby = sbyEl ? parseInt(sbyEl.value, 10) : 1;
+
+                if (!locationId || !name || !start || !end) {
+                    UIController.showToast('Complete all shift parameters', 'error');
+                    return;
+                }
+
+                supabaseClient.from('shifts').insert([{
+                    location_id: locationId,
+                    shift_name: name,
+                    start_time: start,
+                    end_time: end,
+                    regular_capacity: reg,
+                    standby_capacity: sby,
+                    is_active: true
+                }]).then(function(res) {
+                    if (res.error) {
+                        UIController.showToast('Error creating shift: ' + res.error.message, 'error');
+                    } else {
+                        UIController.showToast('Shift template persisted', 'success');
+                        nameEl.value = '';
+                        AppEngine.syncNetworkState();
+                    }
+                });
+            }
         };
 
-        window.addShift = (locId) => {
-            const label = document.getElementById(`new_shift_${locId}`).value.trim();
-            if (!label) return;
-            updateLocations(state.locations.map(loc => loc.id === locId ? { ...loc, shifts: [...(loc.shifts || []), { id: generateId(), label, slotsCount: 2, backupCount: 1 }] } : loc));
-        };
+        /**
+         * UI Controller & Non-Destructive DOM Renderer
+         */
+        var UIController = {
+            renderGrid: function() {
+                var container = document.getElementById('schedule-grid');
+                if (!container) return;
 
-        window.updateShiftSlots = (locId, shiftId, type, change) => {
-            updateLocations(state.locations.map(loc => loc.id === locId ? { ...loc, shifts: loc.shifts.map(s => s.id === shiftId ? { ...s, [type]: Math.max(0, (s[type] || 0) + change) } : s) } : loc));
-        };
-        window.deleteShift = (locId, shiftId) => { if (confirm('Delete shift?')) updateLocations(state.locations.map(loc => loc.id === locId ? { ...loc, shifts: loc.shifts.filter(s => s.id !== shiftId) } : loc)); };
+                var locations = AppEngine.state.locations;
+                var shifts = AppEngine.state.shifts;
+                var slots = AppEngine.state.slots;
 
-        // --- Render UI ---
-        const renderApp = () => {
-            if (!state.dataLoaded || !state.selectedDate) return;
-            const activeDateKey = formatDateKey(state.selectedDate);
-            const activeDayCount = getShiftCountForDate(activeDateKey);
+                if (!locations || locations.length === 0) {
+                    container.innerHTML = '<div class="p-8 text-center bg-white rounded-xl border border-slate-200">' +
+                        '<p class="text-sm font-semibold text-slate-600">No duty locations currently active in system configuration.</p>' +
+                        '</div>';
+                    return;
+                }
 
-            let html = `<div class="min-h-screen">
-                <header class="sticky top-0 z-30 bg-slate-950/80 backdrop-blur-xl border-b border-white/10 shadow-lg">
-                    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 sm:py-4 flex justify-between items-center">
-                        <div class="flex items-center gap-2 sm:gap-3">
-                            <div class="bg-indigo-600 p-1.5 sm:p-2 rounded-xl shadow-lg shadow-indigo-600/20 text-white relative">
-                                <i class="fa-solid fa-calendar text-lg sm:text-xl"></i>
-                                ${state.isSyncing ? `<div class="absolute -top-1 -right-1 w-2.5 h-2.5 bg-emerald-400 rounded-full animate-ping"></div>` : ''}
-                            </div>
-                            <h1 class="text-lg sm:text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-indigo-200 tracking-tight">SMPW Kochi</h1>
-                        </div>
-                        <button onclick="${state.isAdmin ? 'logoutAdmin()' : 'toggleAdminModal(true)'}" class="flex items-center gap-1.5 sm:gap-2 px-3 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all shadow-sm border ${state.isAdmin ? 'bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-slate-800/80 hover:bg-slate-700 border-white/5 text-slate-400'}">
-                            <i class="fa-solid ${state.isAdmin ? 'fa-lock-open' : 'fa-lock'}"></i><span class="hidden sm:inline">${state.isAdmin ? "Admin Active" : "Admin Login"}</span>
-                        </button>
-                    </div>
-                </header>
+                var htmlBuffer = '';
 
-                <main class="max-w-7xl mx-auto px-2 sm:px-6 lg:px-8 py-4 sm:py-6 pb-12">
-                    <div class="mb-6"><div class="flex overflow-x-auto hide-scrollbar gap-2 sm:gap-3 pb-3 scroll-smooth">
-                        ${state.availableDates.map(date => {
-                            const dateKey = formatDateKey(date);
-                            const isSelected = dateKey === activeDateKey;
-                            const shiftCount = getShiftCountForDate(dateKey);
-                            return `
-                                <button onclick="selectDate('${date.toISOString()}')" class="flex-shrink-0 flex flex-col items-center justify-center w-16 sm:w-20 h-20 sm:h-24 rounded-2xl transition-all duration-300 border ${isSelected ? 'border-indigo-500 bg-indigo-600 shadow-lg shadow-indigo-900/40 text-white transform scale-105' : 'border-white/10 bg-slate-900/50 hover:bg-slate-800 text-slate-400 backdrop-blur-sm'}">
-                                    <span class="text-[10px] sm:text-[11px] font-bold tracking-wider uppercase ${isSelected ? 'text-indigo-200' : 'text-slate-500'}">${dateKey === formatDateKey(new Date()) ? 'Today' : formatShortDate(date)}</span>
-                                    <span class="text-xl sm:text-2xl font-bold my-0.5 sm:my-1 ${isSelected ? 'text-white' : 'text-slate-200'}">${date.getDate()}</span>
-                                    <span class="text-[10px] sm:text-[11px] font-medium ${isSelected ? 'text-indigo-200' : 'text-slate-500'}">${formatMonth(date)}</span>
-                                    <div class="h-1.5 w-full flex justify-center mt-1 gap-0.5">${shiftCount > 0 ? `<div class="w-1 h-1 sm:w-1.5 sm:h-1.5 rounded-full ${isSelected ? 'bg-white' : 'bg-indigo-500 shadow-[0_0_8px_rgba(99,102,241,0.8)]'}"></div>` : ''}</div>
-                                </button>
-                            `;
-                        }).join('')}
-                    </div></div>
+                for (var i = 0; i < locations.length; i++) {
+                    var loc = locations[i];
+                    htmlBuffer += '<div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden mb-6">';
+                    
+                    htmlBuffer += '<div class="bg-slate-50 px-5 py-3.5 border-b border-slate-200 flex justify-between items-center">' +
+                        '<div>' +
+                            '<h2 class="font-bold text-slate-800 text-sm sm:text-base">' + this.escapeHtml(loc.name) + '</h2>' +
+                            '<p class="text-xs text-slate-500">' + this.escapeHtml(loc.address || 'Kochi Sector') + '</p>' +
+                        '</div>' +
+                        '<span class="text-[11px] font-bold tracking-wider uppercase px-2.5 py-1 bg-indigo-50 text-indigo-700 rounded-md border border-indigo-100">Active Station</span>' +
+                    '</div>';
 
-                    <div class="flex flex-col mb-4 sm:mb-6 mt-2 border-b border-white/10 pb-3 sm:pb-4 px-2 sm:px-0">
-                        <h2 class="text-xl sm:text-3xl font-bold text-white tracking-tight">${formatDisplayDate(state.selectedDate)}</h2>
-                        <p class="text-indigo-300/80 mt-1 text-xs sm:text-sm flex items-center gap-1.5 sm:gap-2"><span class="w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full bg-indigo-500 animate-pulse"></span>${activeDayCount} registrations today</p>
-                    </div>
+                    var locShifts = shifts.filter(function(s) { return s.location_id === loc.id; });
 
-                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
-                        ${state.locations.map(location => {
-                            const isEditingLoc = state.isAdmin && state.editingLocationId === location.id;
-                            const locAsgn = (state.assignments[activeDateKey] || {})[location.id] || {};
+                    if (locShifts.length === 0) {
+                        htmlBuffer += '<div class="p-6 text-center text-xs text-slate-400">No shifts scheduled for this location.</div>';
+                    } else {
+                        htmlBuffer += '<div class="divide-y divide-slate-100">';
+                        for (var j = 0; j < locShifts.length; j++) {
+                            var shift = locShifts[j];
                             
-                            let locHtml = `<div class="bg-slate-900/60 backdrop-blur-md border border-white/10 rounded-2xl sm:rounded-3xl overflow-hidden flex flex-col shadow-xl">`;
+                            var slot = null;
+                            for (var k = 0; k < slots.length; k++) {
+                                if (slots[k].shift_id === shift.id && slots[k].location_id === loc.id) {
+                                    slot = slots[k];
+                                    break;
+                                }
+                            }
 
-                            if (isEditingLoc) {
-                                locHtml += `<div class="p-4 sm:p-5 border-b border-white/5 bg-slate-800/80 flex flex-col gap-3">
-                                    <input id="edit_name_${location.id}" value="${location.name}" placeholder="Location Name" class="w-full bg-slate-950 border border-white/10 text-white rounded-xl px-3 py-2 text-sm focus:ring-1 focus:ring-indigo-500" />
-                                    <input id="edit_map_${location.id}" value="${location.mapUrl || ''}" placeholder="Google Maps URL" class="w-full bg-slate-950 border border-white/10 text-white rounded-xl px-3 py-2 text-sm focus:ring-1 focus:ring-indigo-500" />
-                                    <input id="edit_phone_${location.id}" value="${location.phone || ''}" placeholder="Contact Phone" class="w-full bg-slate-950 border border-white/10 text-white rounded-xl px-3 py-2 text-sm focus:ring-1 focus:ring-indigo-500" />
-                                    <div class="flex gap-2 justify-end mt-1"><button onclick="setEditingLocation(null)" class="px-4 py-2 bg-slate-700 text-white rounded-lg text-sm font-medium">Cancel</button><button onclick="saveEditLocation('${location.id}')" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-medium flex items-center gap-1"><i class="fa-solid fa-floppy-disk"></i> Save</button></div>
-                                </div>`;
+                            var maxReg = slot ? slot.max_regular : shift.regular_capacity;
+                            var bookedReg = slot ? slot.booked_regular : 0;
+                            var maxSby = slot ? slot.max_standby : shift.standby_capacity;
+                            var bookedSby = slot ? slot.booked_standby : 0;
+                            var isLocked = slot ? slot.is_locked : false;
+
+                            var regAvailable = maxReg - bookedReg;
+                            var sbyAvailable = maxSby - bookedSby;
+
+                            htmlBuffer += '<div class="p-4 sm:p-5 flex flex-col md:flex-row md:items-center md:justify-between gap-4 hover:bg-slate-50/50 transition-colors">' +
+                                '<div class="space-y-1">' +
+                                    '<div class="flex items-center space-x-2">' +
+                                        '<span class="font-bold text-sm text-slate-800">' + this.escapeHtml(shift.shift_name) + '</span>' +
+                                        '<span class="text-xs font-mono text-slate-500 bg-slate-100 px-2 py-0.5 rounded">' + 
+                                            shift.start_time.substring(0, 5) + ' - ' + shift.end_time.substring(0, 5) + 
+                                        '</span>' +
+                                    '</div>' +
+                                    '<div class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500 pt-1">' +
+                                        '<span>Regular: <strong class="' + (regAvailable > 0 ? 'text-emerald-600' : 'text-slate-400') + '">' + regAvailable + ' open</strong> / ' + maxReg + '</span>' +
+                                        '<span>Standby: <strong class="' + (sbyAvailable > 0 ? 'text-amber-600' : 'text-slate-400') + '">' + sbyAvailable + ' open</strong> / ' + maxSby + '</span>' +
+                                    '</div>' +
+                                '</div>';
+
+                            htmlBuffer += '<div class="flex flex-wrap items-center gap-2">';
+                            
+                            if (isLocked) {
+                                htmlBuffer += '<span class="px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-100 text-slate-500 border border-slate-200">Shift Locked</span>';
                             } else {
-                                locHtml += `<div class="p-4 sm:p-5 border-b border-white/5 bg-slate-800/40 flex justify-between items-start">
-                                    <div><h3 class="text-lg sm:text-xl font-bold text-white mb-2 flex items-center gap-2"><i class="fa-solid fa-location-dot text-indigo-400"></i><span class="break-words">${location.name}</span></h3>
-                                    <div class="flex flex-wrap items-center gap-2 sm:gap-4 mt-1">
-                                        ${location.mapUrl ? `<a href="${location.mapUrl}" target="_blank" class="bg-slate-900/80 hover:bg-slate-800 text-xs sm:text-sm text-indigo-300 hover:text-indigo-200 px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors border border-white/5"><i class="fa-solid fa-map"></i> Map</a>` : ''}
-                                        ${location.phone ? `<a href="tel:${location.phone}" class="bg-slate-900/80 hover:bg-slate-800 text-xs sm:text-sm text-emerald-400 hover:text-emerald-300 px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors border border-white/5"><i class="fa-solid fa-phone"></i> Call</a>` : ''}
-                                    </div></div>
-                                    ${state.isAdmin ? `<div class="flex gap-1.5"><button onclick="setEditingLocation('${location.id}')" class="p-2 bg-slate-800 hover:bg-indigo-500/20 text-slate-400 hover:text-indigo-400 rounded-lg transition-colors border border-white/5"><i class="fa-solid fa-pen-to-square"></i></button><button onclick="deleteLocation('${location.id}')" class="p-2 bg-slate-800 hover:bg-red-500/20 text-slate-400 hover:text-red-400 rounded-lg transition-colors border border-white/5"><i class="fa-solid fa-trash-can"></i></button></div>` : ''}
-                                </div>`;
+                                if (regAvailable > 0) {
+                                    htmlBuffer += '<button onclick="UIController.openBookingModal(\'' + (slot ? slot.id : '') + '\', \'' + loc.id + '\', \'' + shift.id + '\', \'' + this.escapeHtml(loc.name) + '\', \'' + this.escapeHtml(shift.shift_name) + ' (' + shift.start_time.substring(0,5) + ')\', \'REGULAR\')" class="px-3.5 py-1.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white transition-colors shadow-sm">' +
+                                        'Book Regular' +
+                                    '</button>';
+                                } else {
+                                    htmlBuffer += '<button disabled class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200">Regular Full</button>';
+                                }
+
+                                if (sbyAvailable > 0) {
+                                    htmlBuffer += '<button onclick="UIController.openBookingModal(\'' + (slot ? slot.id : '') + '\', \'' + loc.id + '\', \'' + shift.id + '\', \'' + this.escapeHtml(loc.name) + '\', \'' + this.escapeHtml(shift.shift_name) + ' (' + shift.start_time.substring(0,5) + ')\', \'STANDBY\')" class="px-3.5 py-1.5 rounded-lg text-xs font-bold bg-amber-500 hover:bg-amber-600 text-white transition-colors shadow-sm">' +
+                                        'Book Standby' +
+                                    '</button>';
+                                } else {
+                                    htmlBuffer += '<button disabled class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200">Standby Full</button>';
+                                }
                             }
 
-                            if (state.isAdmin && !isEditingLoc) {
-                                locHtml += `<div class="bg-slate-950/40 p-3 sm:p-4 border-b border-white/5 flex gap-2"><input id="new_shift_${location.id}" placeholder="New timing (e.g. 08:00 AM - 10:00 AM)" class="flex-1 bg-slate-900 border border-white/10 text-white rounded-xl px-3 py-2 text-xs sm:text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500" /><button onclick="addShift('${location.id}')" class="bg-emerald-600 hover:bg-emerald-500 text-white px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold shadow-md"><i class="fa-solid fa-plus"></i></button></div>`;
-                            }
+                            htmlBuffer += '</div></div>';
+                        }
+                        htmlBuffer += '</div>';
+                    }
 
-                            locHtml += `<div class="p-3 sm:p-5 flex-1 flex flex-col gap-4 sm:gap-6">`;
-                            if (!location.shifts?.length) {
-                                locHtml += `<p class="text-slate-500 text-xs sm:text-sm italic py-4 text-center border border-dashed border-slate-700 rounded-xl">No shifts active.</p>`;
-                            } else {
-                                location.shifts.forEach(shift => {
-                                    const regAsgn = locAsgn[shift.id]?.regular || {};
-                                    const bakAsgn = locAsgn[shift.id]?.backup || {};
-                                    
-                                    locHtml += `<div class="bg-slate-950/40 border border-white/5 rounded-xl sm:rounded-2xl p-3 sm:p-5 shadow-inner">
-                                        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 pb-3 border-b border-white/5">
-                                            <div class="text-indigo-300 font-bold text-sm sm:text-[15px] flex items-center gap-2"><i class="fa-solid fa-clock text-indigo-400"></i> ${shift.label}</div>
-                                            ${state.isAdmin ? `<div class="flex flex-wrap items-center gap-2 sm:gap-4 bg-slate-900/80 p-1.5 sm:p-2 rounded-xl border border-white/5"><div class="flex items-center gap-1.5 bg-slate-800/80 px-2 py-1 rounded-lg"><span class="text-[10px] text-slate-400 uppercase tracking-wider font-bold mr-1">Reg:</span><button onclick="updateShiftSlots('${location.id}', '${shift.id}', 'slotsCount', -1)" class="p-1 text-slate-400 hover:text-white bg-slate-700 rounded"><i class="fa-solid fa-minus text-[10px]"></i></button><span class="text-white text-xs font-bold w-3 text-center">${shift.slotsCount||0}</span><button onclick="updateShiftSlots('${location.id}', '${shift.id}', 'slotsCount', 1)" class="p-1 text-slate-400 hover:text-white bg-slate-700 rounded"><i class="fa-solid fa-plus text-[10px]"></i></button></div><div class="flex items-center gap-1.5 bg-slate-800/80 px-2 py-1 rounded-lg border border-amber-500/20"><span class="text-[10px] text-amber-500/70 uppercase tracking-wider font-bold mr-1">Bak:</span><button onclick="updateShiftSlots('${location.id}', '${shift.id}', 'backupCount', -1)" class="p-1 text-amber-500 hover:text-amber-300 bg-slate-700 rounded"><i class="fa-solid fa-minus text-[10px]"></i></button><span class="text-amber-400 text-xs font-bold w-3 text-center">${shift.backupCount||0}</span><button onclick="updateShiftSlots('${location.id}', '${shift.id}', 'backupCount', 1)" class="p-1 text-amber-500 hover:text-amber-300 bg-slate-700 rounded"><i class="fa-solid fa-plus text-[10px]"></i></button></div><button onclick="deleteShift('${location.id}', '${shift.id}')" class="p-1.5 ml-auto sm:ml-0 text-slate-500 hover:text-red-400 bg-slate-800 rounded-lg transition-colors"><i class="fa-solid fa-trash-can"></i></button></div>` : ''}
-                                        </div>`;
+                    htmlBuffer += '</div>';
+                }
 
-                                    if (shift.slotsCount > 0) {
-                                        locHtml += `<div class="space-y-2 sm:space-y-3 mb-4 sm:mb-5">`;
-                                        for(let i=0; i<shift.slotsCount; i++) {
-                                            if (regAsgn[i]) {
-                                                locHtml += `<div class="flex items-center justify-between bg-indigo-500/10 border border-indigo-500/20 rounded-xl px-3 sm:px-4 py-2.5 sm:py-3 fade-in"><div class="flex items-center gap-2 sm:gap-3"><div class="w-5 h-5 sm:w-6 sm:h-6 rounded-full bg-indigo-500/20 text-indigo-300 flex items-center justify-center"><i class="fa-solid fa-users text-xs"></i></div><span class="font-semibold text-indigo-100 text-sm">${regAsgn[i]}</span></div>${state.isAdmin ? `<button onclick="clearSlot('${activeDateKey}', '${location.id}', '${shift.id}', 'regular', ${i})" class="text-slate-500 hover:text-red-400 bg-slate-900/50 hover:bg-slate-800 p-1.5 rounded-lg transition-colors"><i class="fa-solid fa-trash-can"></i></button>` : ''}</div>`;
-                                            } else {
-                                                locHtml += `<div class="flex gap-2 items-center w-full fade-in"><div class="relative flex-1"><input id="input_${location.id}_${shift.id}_regular_${i}" type="text" placeholder="Your name..." class="w-full bg-slate-950/50 border border-indigo-500/30 text-white rounded-xl pl-3 sm:pl-4 pr-8 py-2 sm:py-2.5 text-xs sm:text-sm focus:outline-none focus:ring-1 focus:border-indigo-500 focus:ring-indigo-500/50 placeholder-slate-500 transition-all shadow-inner" onkeydown="if(event.key === 'Enter') saveSlot('${activeDateKey}', '${location.id}', '${shift.id}', 'regular', ${i})" /><div class="absolute right-3 top-1/2 -translate-y-1/2 text-indigo-500/70"><i class="fa-solid fa-users text-xs"></i></div></div><button onclick="saveSlot('${activeDateKey}', '${location.id}', '${shift.id}', 'regular', ${i})" class="bg-indigo-600 hover:bg-indigo-500 text-white p-2 sm:p-2.5 rounded-xl transition-all shadow-md active:scale-95 flex-shrink-0"><i class="fa-solid fa-check"></i></button></div>`;
-                                            }
-                                        }
-                                        locHtml += `</div>`;
-                                    }
+                container.innerHTML = htmlBuffer;
+            },
 
-                                    if (shift.backupCount > 0) {
-                                        locHtml += `<div class="mt-3 sm:mt-4 pt-4 border-t border-white/5 relative"><span class="absolute -top-2.5 left-3 sm:left-4 bg-slate-900 px-2 text-[9px] sm:text-[10px] font-bold uppercase tracking-wider text-amber-500/80 flex items-center gap-1 rounded-sm"><i class="fa-solid fa-user-shield"></i> Standby</span><div class="space-y-2 sm:space-y-3 pt-1 sm:pt-2">`;
-                                        for(let i=0; i<shift.backupCount; i++) {
-                                            if (bakAsgn[i]) {
-                                                locHtml += `<div class="flex items-center justify-between bg-amber-500/10 border border-amber-500/20 rounded-xl px-3 sm:px-4 py-2.5 sm:py-3 fade-in"><div class="flex items-center gap-2 sm:gap-3"><div class="w-5 h-5 sm:w-6 sm:h-6 rounded-full bg-amber-500/20 text-amber-300 flex items-center justify-center"><i class="fa-solid fa-user-shield text-xs"></i></div><span class="font-semibold text-amber-100 text-sm">${bakAsgn[i]}</span></div>${state.isAdmin ? `<button onclick="clearSlot('${activeDateKey}', '${location.id}', '${shift.id}', 'backup', ${i})" class="text-slate-500 hover:text-red-400 bg-slate-900/50 hover:bg-slate-800 p-1.5 rounded-lg transition-colors"><i class="fa-solid fa-trash-can"></i></button>` : ''}</div>`;
-                                            } else {
-                                                locHtml += `<div class="flex gap-2 items-center w-full fade-in"><div class="relative flex-1"><input id="input_${location.id}_${shift.id}_backup_${i}" type="text" placeholder="Backup name..." class="w-full bg-slate-950/50 border border-amber-500/30 text-white rounded-xl pl-3 sm:pl-4 pr-8 py-2 sm:py-2.5 text-xs sm:text-sm focus:outline-none focus:ring-1 focus:border-amber-500 focus:ring-amber-500/50 placeholder-slate-500 transition-all shadow-inner" onkeydown="if(event.key === 'Enter') saveSlot('${activeDateKey}', '${location.id}', '${shift.id}', 'backup', ${i})" /><div class="absolute right-3 top-1/2 -translate-y-1/2 text-amber-500/70"><i class="fa-solid fa-user-shield text-xs"></i></div></div><button onclick="saveSlot('${activeDateKey}', '${location.id}', '${shift.id}', 'backup', ${i})" class="bg-amber-600 hover:bg-amber-500 text-white p-2 sm:p-2.5 rounded-xl transition-all shadow-md active:scale-95 flex-shrink-0"><i class="fa-solid fa-check"></i></button></div>`;
-                                            }
-                                        }
-                                        locHtml += `</div></div>`;
-                                    }
-                                    locHtml += `</div>`;
-                                });
-                            }
-                            locHtml += `</div></div>`;
-                            return locHtml;
-                        }).join('')}
-                        
-                        ${state.isAdmin ? `<div class="bg-indigo-950/20 border border-indigo-500/30 rounded-2xl sm:rounded-3xl p-4 sm:p-5 flex flex-col"><h3 class="text-base sm:text-lg font-bold text-indigo-300 mb-4 flex items-center gap-2"><i class="fa-solid fa-plus"></i> Add New Location</h3><form onsubmit="addLocation(event)" class="space-y-3"><input id="new_loc_name" required placeholder="Location Name *" class="w-full bg-slate-900/80 border border-white/10 text-white rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500" /><input id="new_loc_map" placeholder="Google Maps URL (Optional)" class="w-full bg-slate-900/80 border border-white/10 text-white rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500" /><input id="new_loc_phone" placeholder="Phone Number (Optional)" class="w-full bg-slate-900/80 border border-white/10 text-white rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500" /><button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-3 rounded-xl text-sm font-bold transition-all shadow-md mt-2">Create Location</button></form></div>` : ''}
-                    </div>
-                </main>
+            openBookingModal: function(slotId, locationId, shiftId, locationName, shiftDetails, type) {
+                if (!slotId || slotId === '') {
+                    supabaseClient.from('schedule_slots').insert([{
+                        location_id: locationId,
+                        shift_id: shiftId,
+                        slot_date: AppEngine.state.selectedDate,
+                        max_regular: 2,
+                        max_standby: 1
+                    }]).select().single().then(function(res) {
+                        if (res.data) {
+                            AppEngine.state.slots.push(res.data);
+                            UIController.openBookingModal(res.data.id, locationId, shiftId, locationName, shiftDetails, type);
+                        } else {
+                            UIController.showToast('Unable to initialize slot record', 'error');
+                        }
+                    });
+                    return;
+                }
 
-                ${state.showAdminLogin ? `
-                    <div class="fixed inset-0 z-50 flex items-center justify-center p-4">
-                        <div class="absolute inset-0 bg-slate-950/80 backdrop-blur-sm" onclick="toggleAdminModal(false)"></div>
-                        <div class="bg-slate-900 border border-white/10 w-full max-w-sm rounded-3xl shadow-2xl relative z-10 p-5 sm:p-6 fade-in">
-                            <div class="flex items-center gap-3 mb-5 text-indigo-400"><i class="fa-solid fa-shield-halved text-2xl sm:text-3xl"></i><h3 class="text-lg sm:text-xl font-bold text-white">Admin Access</h3></div>
-                            <form onsubmit="handleAdminAuth(event)" class="space-y-4">
-                                <div><input id="admin_pwd" type="password" placeholder="Enter PIN..." class="w-full bg-slate-950 border border-white/10 text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500" autofocus />${state.loginError ? `<p class="text-red-400 text-xs mt-2">Incorrect PIN.</p>` : ''}</div>
-                                <div class="flex gap-3 pt-2"><button type="button" onclick="toggleAdminModal(false)" class="flex-1 bg-slate-800 hover:bg-slate-700 text-white py-2.5 sm:py-3 rounded-xl text-sm font-medium transition-colors">Cancel</button><button type="submit" class="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white py-2.5 sm:py-3 rounded-xl text-sm font-medium transition-colors">Unlock</button></div>
-                            </form>
-                        </div>
-                    </div>
-                ` : ''}
-            </div>`;
-            root.innerHTML = html;
+                document.getElementById('modal-slot-id').value = slotId;
+                document.getElementById('modal-booking-type').value = type;
+                document.getElementById('modal-location-text').innerHTML = '<span class="font-bold">Location:</span> ' + this.escapeHtml(locationName);
+                document.getElementById('modal-time-text').innerHTML = '<span class="font-bold">Shift:</span> ' + this.escapeHtml(shiftDetails);
+                document.getElementById('modal-type-text').innerHTML = '<span class="font-bold">Designation:</span> ' + 
+                    (type === 'REGULAR' ? '<span class="text-emerald-700 font-bold">Regular Duty</span>' : '<span class="text-amber-700 font-bold">Standby Reserve</span>');
+
+                document.getElementById('booking-modal').classList.remove('hidden');
+            },
+
+            closeModal: function() {
+                document.getElementById('booking-modal').classList.add('hidden');
+                document.getElementById('booking-form').reset();
+            },
+
+            promptAdminLogin: function() {
+                if (StorageEngine.isAdminAuthenticated()) {
+                    UIController.toggleAdminPanel();
+                    return;
+                }
+
+                var pin = prompt('Enter SMPW Kochi Administrative PIN:');
+                if (!pin) return;
+
+                SecurityEngine.sha256(pin.trim()).then(function(hash) {
+                    supabaseClient.from('system_config').select('value_hash').eq('key', 'admin_pin_hash').single().then(function(res) {
+                        if (res.data && res.data.value_hash === hash) {
+                            StorageEngine.setAdminSession(true);
+                            UIController.showAdminPanel();
+                            UIController.showToast('Admin clearance granted', 'success');
+                        } else {
+                            UIController.showToast('Invalid security PIN code', 'error');
+                        }
+                    }).catch(function() {
+                        UIController.showToast('Authorization network verification failure', 'error');
+                    });
+                });
+            },
+
+            showAdminPanel: function() {
+                var panel = document.getElementById('admin-panel');
+                var btn = document.getElementById('admin-toggle-btn');
+                if (panel) panel.classList.remove('hidden');
+                if (btn) btn.innerText = 'Admin Active';
+                this.updateAdminShiftLocationDropdown();
+            },
+
+            toggleAdminPanel: function() {
+                var panel = document.getElementById('admin-panel');
+                if (panel) {
+                    panel.classList.toggle('hidden');
+                }
+            },
+
+            logoutAdmin: function() {
+                StorageEngine.setAdminSession(false);
+                var panel = document.getElementById('admin-panel');
+                var btn = document.getElementById('admin-toggle-btn');
+                if (panel) panel.classList.add('hidden');
+                if (btn) btn.innerText = 'Admin Portal';
+                UIController.showToast('Admin session locked', 'info');
+            },
+
+            updateAdminShiftLocationDropdown: function() {
+                var select = document.getElementById('admin-shift-loc');
+                if (!select) return;
+                var locations = AppEngine.state.locations;
+                var opts = '<option value="">-- Choose Target Location --</option>';
+                for (var i = 0; i < locations.length; i++) {
+                    opts += '<option value="' + locations[i].id + '">' + this.escapeHtml(locations[i].name) + '</option>';
+                }
+                select.innerHTML = opts;
+            },
+
+            updateStatusBadge: function(status, label) {
+                var badge = document.getElementById('connection-badge');
+                var dot = document.getElementById('connection-dot');
+                var txt = document.getElementById('connection-text');
+                if (!badge || !dot || !txt) return;
+
+                txt.innerText = label;
+                if (status === 'connected') {
+                    dot.className = 'h-2 w-2 rounded-full bg-emerald-400';
+                    badge.className = 'flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-950/60 text-emerald-300 border border-emerald-800';
+                } else if (status === 'syncing') {
+                    dot.className = 'h-2 w-2 rounded-full bg-amber-400 animate-pulse';
+                    badge.className = 'flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-950/60 text-amber-300 border border-amber-800';
+                } else {
+                    dot.className = 'h-2 w-2 rounded-full bg-rose-400';
+                    badge.className = 'flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-rose-950/60 text-rose-300 border border-rose-800';
+                }
+            },
+
+            showToast: function(message, type) {
+                var container = document.getElementById('toast-container');
+                if (!container) return;
+
+                var toast = document.createElement('div');
+                var bgStyle = 'bg-slate-900 border-slate-700 text-white';
+                if (type === 'error') bgStyle = 'bg-rose-900 border-rose-700 text-rose-100';
+                if (type === 'success') bgStyle = 'bg-emerald-900 border-emerald-700 text-emerald-100';
+
+                toast.className = 'pointer-events-auto p-3.5 rounded-xl border shadow-xl text-xs font-semibold flex items-center justify-between transition-all duration-300 ' + bgStyle;
+                toast.innerHTML = '<span>' + this.escapeHtml(message) + '</span>';
+
+                container.appendChild(toast);
+
+                setTimeout(function() {
+                    toast.style.opacity = '0';
+                    setTimeout(function() {
+                        if (toast.parentNode) toast.parentNode.removeChild(toast);
+                    }, 300);
+                }, 4000);
+            },
+
+            escapeHtml: function(str) {
+                if (!str) return '';
+                return String(str)
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#039;');
+            }
         };
+
+        document.addEventListener('DOMContentLoaded', function() {
+            AppEngine.init();
+        });
     </script>
 </body>
 </html>
-
-
