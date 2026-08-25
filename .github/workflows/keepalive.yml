@@ -1,0 +1,15 @@
+name: Supabase Keep-Alive Pulse
+on:
+  schedule:
+    - cron: '0 0 */2 * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send API Health Request
+        run: |
+          curl -s -X GET "https://vffbprsuvrwkzvwnipvg.supabase.co/rest/v1/locations?select=id&limit=1" \
+               -H "apikey: sb_publishable_a2RUr35OTMoqN4FRA3aTgg_1kHxmFp1" \
+               -H "Authorization: Bearer sb_publishable_a2RUr35OTMoqN4FRA3aTgg_1kHxmFp1" > /dev/null
