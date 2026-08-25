@@ -10,7 +10,7 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <!-- Supabase JS Client CDN -->
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-    <!-- SheetJS CDN for Native In-Browser Excel Parsing -->
+    <!-- SheetJS CDN for In-Browser Excel Parsing -->
     <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
     <style>
         .hide-scrollbar::-webkit-scrollbar { display: none; }
@@ -39,9 +39,9 @@
         var CONFIG = {
             SUPABASE_URL: 'https://vffbprsuvrwkzvwnipvg.supabase.co',
             SUPABASE_ANON_KEY: 'sb_publishable_a2RUr35OTMoqN4FRA3aTgg_1kHxmFp1',
-            LOCAL_STORAGE_KEY: 'smpw_kochi_cache_v5',
-            ADMIN_SESSION_KEY: 'smpw_admin_auth_v5',
-            USER_SESSION_KEY: 'smpw_user_auth_v5',
+            LOCAL_STORAGE_KEY: 'smpw_kochi_cache_v6',
+            ADMIN_SESSION_KEY: 'smpw_admin_auth_v6',
+            USER_SESSION_KEY: 'smpw_user_auth_v6',
             FALLBACK_PIN: '9847'
         };
 
@@ -73,27 +73,31 @@
         };
 
         // =======================================================================
-        // Utilities (Legacy JS Compatible - No ?. or ?? syntax)
+        // Utilities (Legacy JS Compatible - No Breaking Syntax)
         // =======================================================================
-        function generateNext30Days() {
+        function generateNext30Days(baseDate) {
             var dates = [];
-            var today = new Date();
-            for (var i = 0; i < 30; i++) {
-                var nextDate = new Date(today);
-                nextDate.setDate(today.getDate() + i);
+            var start = baseDate ? new Date(baseDate) : new Date();
+            for (var i = 0; i < 31; i++) {
+                var nextDate = new Date(start);
+                nextDate.setDate(start.getDate() + i);
                 dates.push(nextDate);
             }
             return dates;
         }
 
         function formatDateKey(dateObj) {
-            var d = dateObj ? dateObj : new Date();
-            return d.toISOString().split('T')[0];
+            if (!dateObj) return '';
+            var d = new Date(dateObj);
+            var year = d.getFullYear();
+            var month = ('0' + (d.getMonth() + 1)).slice(-2);
+            var day = ('0' + d.getDate()).slice(-2);
+            return year + '-' + month + '-' + day;
         }
 
         function formatDisplayDate(dateObj) {
             if (!dateObj) return '';
-            return dateObj.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+            return dateObj.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' });
         }
 
         function formatShortDate(dateObj) {
@@ -108,12 +112,7 @@
 
         function escapeHtml(str) {
             if (!str) return '';
-            return String(str)
-                .replace(/&/g, '&amp;')
-                .replace(/</g, '&lt;')
-                .replace(/>/g, '&gt;')
-                .replace(/"/g, '&quot;')
-                .replace(/'/g, '&#039;');
+            return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
         }
 
         function formatMapUrl(rawUrl) {
@@ -121,6 +120,17 @@
             var trimmed = rawUrl.trim();
             if (trimmed.indexOf('http://') === 0 || trimmed.indexOf('https://') === 0) return trimmed;
             return 'https://maps.google.com/?q=' + encodeURIComponent(trimmed);
+        }
+
+        function parseExcelDate(val) {
+            if (!val) return null;
+            if (val instanceof Date) return val;
+            if (typeof val === 'number') {
+                return new Date((val - 25569) * 86400 * 1000);
+            }
+            var parsed = new Date(val);
+            if (!isNaN(parsed.getTime())) return parsed;
+            return null;
         }
 
         function sha256(str) {
@@ -150,7 +160,7 @@
         }
 
         // =======================================================================
-        // Local Cache & Persistence
+        // Local Cache & Storage
         // =======================================================================
         var StorageEngine = {
             getCache: function() {
@@ -285,6 +295,239 @@
         };
 
         // =======================================================================
+        // 1-Month Schedule Excel Importer Engine
+        // =======================================================================
+        window.triggerExcelScheduleUpload = function() {
+            document.getElementById('excel_schedule_input').click();
+        };
+
+        window.handleExcelScheduleUpload = function(event) {
+            var file = event.target.files[0];
+            if (!file) return;
+
+            showToast('Parsing 1-month schedule file...', 'success');
+            var reader = new FileReader();
+
+            reader.onload = function(e) {
+                try {
+                    var data = new Uint8Array(e.target.result);
+                    var workbook = window.XLSX.read(data, { type: 'array' });
+                    var firstSheetName = workbook.SheetNames[0];
+                    var worksheet = workbook.Sheets[firstSheetName];
+                    var rows = window.XLSX.utils.sheet_to_json(worksheet, { defval: '' });
+
+                    if (!rows || rows.length === 0) {
+                        showToast('Uploaded spreadsheet is empty.', 'error');
+                        return;
+                    }
+
+                    // Process imported spots, shifts, dates, and volunteer assignments
+                    processImportedScheduleRows(rows);
+                } catch (err) {
+                    console.error('Schedule parse error:', err);
+                    showToast('Failed to parse schedule Excel file.', 'error');
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        };
+
+        function processImportedScheduleRows(rows) {
+            var contactMap = {};
+            for (var c = 0; c < state.contacts.length; c++) {
+                var cleanN = state.contacts[c].full_name.trim().toLowerCase();
+                contactMap[cleanN] = state.contacts[c].phone;
+            }
+
+            var locationRecords = {}; // spotName -> { name, shifts: { shiftName: [ { date, volunteers: [] } ] } }
+            var uniqueDates = [];
+
+            for (var i = 0; i < rows.length; i++) {
+                var row = rows[i];
+                var spotName = '';
+                var shiftName = '';
+                var dateVal = null;
+                var regularVolunteers = [];
+                var standbyVolunteers = [];
+
+                // Detect column names dynamically
+                var keys = Object.keys(row);
+                for (var k = 0; k < keys.length; k++) {
+                    var key = keys[k].trim();
+                    var keyLower = key.toLowerCase();
+                    var val = String(row[key]).trim();
+                    if (!val) continue;
+
+                    if (keyLower === 'spot' || keyLower === 'location' || keyLower === 'place' || keyLower === 'duty station' || keyLower.indexOf('spot') !== -1) {
+                        spotName = val;
+                    } else if (keyLower === 'shift' || keyLower === 'time' || keyLower === 'timing' || keyLower === 'time shift') {
+                        shiftName = val;
+                    } else if (keyLower === 'date' || keyLower === 'day') {
+                        dateVal = parseExcelDate(row[key]);
+                    } else if (keyLower.indexOf('standby') !== -1 || keyLower.indexOf('backup') !== -1) {
+                        standbyVolunteers.push(val);
+                    } else if (keyLower.indexOf('name') !== -1 || keyLower.indexOf('volunteer') !== -1 || keyLower.indexOf('person') !== -1 || keyLower === 'p1' || keyLower === 'p2') {
+                        regularVolunteers.push(val);
+                    }
+                }
+
+                if (!spotName) continue;
+                if (!shiftName) shiftName = '08:00 AM - 10:00 AM';
+                if (!dateVal) dateVal = new Date();
+
+                var dateKey = formatDateKey(dateVal);
+                if (uniqueDates.indexOf(dateKey) === -1) uniqueDates.push(dateKey);
+
+                if (!locationRecords[spotName]) locationRecords[spotName] = {};
+                if (!locationRecords[spotName][shiftName]) locationRecords[spotName][shiftName] = {};
+                if (!locationRecords[spotName][shiftName][dateKey]) {
+                    locationRecords[spotName][shiftName][dateKey] = {
+                        regular: regularVolunteers,
+                        standby: standbyVolunteers
+                    };
+                }
+            }
+
+            // Sync imported locations, shifts, slots, and bookings to Supabase
+            saveImportedScheduleToDatabase(locationRecords, uniqueDates, contactMap);
+        }
+
+        function saveImportedScheduleToDatabase(locationRecords, uniqueDates, contactMap) {
+            var spotNames = Object.keys(locationRecords);
+            if (spotNames.length === 0) {
+                showToast('No valid Spots found in the uploaded file.', 'error');
+                return;
+            }
+
+            // Sort and expand available calendar dates based on schedule
+            uniqueDates.sort();
+            var parsedDates = uniqueDates.map(function(dStr) { return new Date(dStr + 'T00:00:00'); });
+            if (parsedDates.length > 0) {
+                state.availableDates = parsedDates;
+                state.selectedDate = parsedDates[0];
+            }
+
+            var locInsertPromises = spotNames.map(function(spot) {
+                return supabaseClient.from('locations').upsert({
+                    name: spot,
+                    address: spot + ', Kochi',
+                    is_active: true
+                }, { onConflict: 'name' }).select();
+            });
+
+            Promise.all(locInsertPromises).then(function() {
+                // Re-fetch locations to get UUIDs
+                supabaseClient.from('locations').select('*').then(function(locRes) {
+                    var dbLocations = locRes.data || [];
+                    var locMap = {};
+                    for (var l = 0; l < dbLocations.length; l++) {
+                        locMap[dbLocations[l].name] = dbLocations[l].id;
+                    }
+
+                    // Insert Shifts and Slots
+                    var shiftInserts = [];
+                    for (var spot in locationRecords) {
+                        var locId = locMap[spot];
+                        if (!locId) continue;
+
+                        for (var shiftLabel in locationRecords[spot]) {
+                            shiftInserts.push({
+                                location_id: locId,
+                                shift_name: shiftLabel,
+                                start_time: '08:00:00',
+                                end_time: '12:00:00',
+                                regular_capacity: 2,
+                                standby_capacity: 1,
+                                is_active: true
+                            });
+                        }
+                    }
+
+                    supabaseClient.from('shifts').upsert(shiftInserts).select().then(function(shiftRes) {
+                        // Re-fetch all shifts
+                        supabaseClient.from('shifts').select('*').then(function(allShiftsRes) {
+                            var dbShifts = allShiftsRes.data || [];
+                            
+                            // Insert Schedule Slots & Bookings
+                            var slotPromises = [];
+                            for (var spot in locationRecords) {
+                                var locId = locMap[spot];
+                                if (!locId) continue;
+
+                                for (var shiftLabel in locationRecords[spot]) {
+                                    var shiftId = null;
+                                    for (var s = 0; s < dbShifts.length; s++) {
+                                        if (dbShifts[s].location_id === locId && dbShifts[s].shift_name === shiftLabel) {
+                                            shiftId = dbShifts[s].id;
+                                            break;
+                                        }
+                                    }
+                                    if (!shiftId && dbShifts.length > 0) shiftId = dbShifts[0].id;
+
+                                    var dateObj = locationRecords[spot][shiftLabel];
+                                    for (var dKey in dateObj) {
+                                        (function(lId, sId, dateStr, regVols, sbyVols) {
+                                            slotPromises.push(
+                                                supabaseClient.from('schedule_slots').upsert({
+                                                    location_id: lId,
+                                                    shift_id: sId,
+                                                    slot_date: dateStr,
+                                                    max_regular: Math.max(2, regVols.length),
+                                                    max_standby: Math.max(1, sbyVols.length),
+                                                    booked_regular: regVols.length,
+                                                    booked_standby: sbyVols.length
+                                                }, { onConflict: 'location_id,shift_id,slot_date' }).select().single().then(function(slotRes) {
+                                                    if (slotRes.data) {
+                                                        var slotId = slotRes.data.id;
+                                                        var bookingInserts = [];
+
+                                                        for (var r = 0; r < regVols.length; r++) {
+                                                            var rName = regVols[r].trim();
+                                                            var rPhone = contactMap[rName.toLowerCase()] || 'Registered Online';
+                                                            bookingInserts.push({
+                                                                slot_id: slotId,
+                                                                volunteer_name: rName,
+                                                                volunteer_phone: rPhone,
+                                                                booking_type: 'REGULAR',
+                                                                status: 'CONFIRMED',
+                                                                is_confirmed: false
+                                                            });
+                                                        }
+
+                                                        for (var sb = 0; sb < sbyVols.length; sb++) {
+                                                            var sbName = sbyVols[sb].trim();
+                                                            var sbPhone = contactMap[sbName.toLowerCase()] || 'Registered Online';
+                                                            bookingInserts.push({
+                                                                slot_id: slotId,
+                                                                volunteer_name: sbName,
+                                                                volunteer_phone: sbPhone,
+                                                                booking_type: 'STANDBY',
+                                                                status: 'CONFIRMED',
+                                                                is_confirmed: false
+                                                            });
+                                                        }
+
+                                                        if (bookingInserts.length > 0) {
+                                                            return supabaseClient.from('bookings').insert(bookingInserts);
+                                                        }
+                                                    }
+                                                })
+                                            );
+                                        })(locId, shiftId, dKey, dateObj[dKey].regular, dateObj[dKey].standby);
+                                    }
+                                }
+                            }
+
+                            Promise.all(slotPromises).then(function() {
+                                showToast('1-Month Schedule successfully imported and published!', 'success');
+                                AppEngine.syncWithDatabase();
+                            });
+                        });
+                    });
+                });
+            });
+        }
+
+        // =======================================================================
         // User Slot Actions & Attendance Checkmark
         // =======================================================================
         window.claimYellowSlot = function(locationId, shiftId, slotType) {
@@ -392,7 +635,7 @@
         };
 
         // =======================================================================
-        // Excel Contact Upload & Master Roster Ingestion
+        // Excel Contact List Importer (Allowlist)
         // =======================================================================
         window.triggerExcelContactUpload = function() {
             document.getElementById('excel_contact_input').click();
@@ -406,7 +649,7 @@
             reader.onload = function(e) {
                 try {
                     var data = new Uint8Array(e.target.result);
-                    var workbook = window.XLSX.read(data, {type: 'array'});
+                    var workbook = window.XLSX.read(data, { type: 'array' });
                     var firstSheet = workbook.SheetNames[0];
                     var rows = window.XLSX.utils.sheet_to_json(workbook.Sheets[firstSheet]);
                     
@@ -445,11 +688,11 @@
         };
 
         // =======================================================================
-        // 1-Click WhatsApp Automations (Direct Batch & Group Broadcast)
+        // 1-Click WhatsApp Automations
         // =======================================================================
         window.sendSingleWhatsAppReminder = function(phone, volunteerName, locationName, shiftName) {
             var dateStr = formatDisplayDate(state.selectedDate);
-            var message = "Hello " + volunteerName + ",\n\nThis is a reminder for your SMPW Kochi duty:\n\n📍 Location: " + locationName + "\n📅 Date: " + dateStr + "\n⏰ Shift: " + shiftName + "\n\nPlease open the portal and check the box to confirm your attendance.\nThank you!";
+            var message = "Hello " + volunteerName + ",\n\nThis is a reminder for your upcoming duty assignment for SMPW Kochi:\n\n📍 Location: " + locationName + "\n📅 Date: " + dateStr + "\n⏰ Shift: " + shiftName + "\n\nPlease open the scheduling portal and tap the checkmark to confirm your attendance.\nThank you!";
             var cleanPhone = String(phone).replace(/\D/g, '');
             if (cleanPhone.length === 10) cleanPhone = '91' + cleanPhone;
             
@@ -581,7 +824,7 @@
                     showToast('Welcome, ' + matched.full_name + '!', 'success');
                     renderApp();
                 } else {
-                    showToast('Phone number not found in authorized roster. Contact Admin.', 'error');
+                    showToast('Phone number not found in authorized roster. Contact Overseer.', 'error');
                 }
             }).catch(function() { showToast('Authentication check error', 'error'); });
         };
@@ -725,7 +968,7 @@
         };
 
         // =======================================================================
-        // Master Render Engine (Restricted Visibility + Yellow/Green Slots)
+        // Master Render Engine
         // =======================================================================
         function renderApp() {
             var root = document.getElementById('app-root');
@@ -825,23 +1068,27 @@
 
             html += '<main class="max-w-7xl mx-auto px-2 sm:px-6 lg:px-8 py-4 sm:py-6">';
 
-            // Admin Actions Toolbar: WhatsApp Reminders & Contact Upload
+            // Admin Actions Toolbar: 1-Month Schedule Upload, WhatsApp Reminders, Contacts
             if (state.isAdmin) {
                 html += '<div class="bg-indigo-950/20 border border-indigo-500/30 rounded-2xl p-4 sm:p-5 mb-6 flex flex-col md:flex-row items-center justify-between gap-4 shadow-xl">' +
                     '<div>' +
                         '<h3 class="font-bold text-indigo-300 flex items-center gap-2"><i class="fa-solid fa-wand-magic-sparkles"></i> Overseer Broadcast & Roster Tools</h3>' +
-                        '<p class="text-xs text-indigo-400/70 mt-1">1-Click WhatsApp reminder queues and Excel contact updates.</p>' +
+                        '<p class="text-xs text-indigo-400/70 mt-1">Upload 1-month schedule spreadsheet (.xlsx) with Spot & shift details.</p>' +
                     '</div>' +
                     '<div class="flex flex-wrap items-center gap-2 w-full md:w-auto">' +
-                        '<button onclick="sendAllWhatsAppRemindersBatch()" class="flex-1 md:flex-none bg-emerald-600 hover:bg-emerald-500 text-white px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold shadow-md transition-colors flex items-center justify-center gap-1.5">' +
-                            '<i class="fa-brands fa-whatsapp text-base"></i> Send All WhatsApp Reminders' +
+                        '<input type="file" id="excel_schedule_input" accept=".xlsx, .xls, .csv" class="hidden" onchange="handleExcelScheduleUpload(event)" />' +
+                        '<button onclick="triggerExcelScheduleUpload()" class="flex-1 md:flex-none bg-indigo-600 hover:bg-indigo-500 text-white px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold shadow-md transition-colors flex items-center justify-center gap-1.5">' +
+                            '<i class="fa-solid fa-calendar-plus text-base"></i> Upload Monthly Schedule (.xlsx)' +
                         '</button>' +
-                        '<button onclick="copyWhatsAppGroupBroadcast()" class="flex-1 md:flex-none bg-indigo-600 hover:bg-indigo-500 text-white px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold shadow-md transition-colors flex items-center justify-center gap-1.5">' +
-                            '<i class="fa-solid fa-copy"></i> Copy Group Summary' +
+                        '<button onclick="sendAllWhatsAppRemindersBatch()" class="flex-1 md:flex-none bg-emerald-600 hover:bg-emerald-500 text-white px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold shadow-md transition-colors flex items-center justify-center gap-1.5">' +
+                            '<i class="fa-brands fa-whatsapp text-base"></i> WhatsApp Reminders' +
+                        '</button>' +
+                        '<button onclick="copyWhatsAppGroupBroadcast()" class="flex-1 md:flex-none bg-slate-800 hover:bg-slate-700 text-slate-200 border border-white/10 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold shadow-md transition-colors flex items-center justify-center gap-1.5">' +
+                            '<i class="fa-solid fa-copy text-indigo-400"></i> Copy Summary' +
                         '</button>' +
                         '<input type="file" id="excel_contact_input" accept=".xlsx, .xls, .csv" class="hidden" onchange="handleExcelContactUpload(event)" />' +
                         '<button onclick="triggerExcelContactUpload()" class="flex-1 md:flex-none bg-slate-800 hover:bg-slate-700 text-slate-200 border border-white/10 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold shadow-md transition-colors flex items-center justify-center gap-1.5">' +
-                            '<i class="fa-solid fa-file-excel text-emerald-400"></i> Upload New Contact List' +
+                            '<i class="fa-solid fa-address-book text-emerald-400"></i> Contacts' +
                         '</button>' +
                     '</div>' +
                 '</div>';
@@ -885,7 +1132,7 @@
                 '</p>' +
             '</div>';
 
-            // Locations Grid
+            // Locations Grid (Spots)
             html += '<div class="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">';
 
             for (var l = 0; l < state.locations.length; l++) {
@@ -895,7 +1142,7 @@
 
                 html += '<div class="bg-slate-900/60 backdrop-blur-md border border-white/10 rounded-2xl sm:rounded-3xl overflow-hidden flex flex-col shadow-xl">';
 
-                // Location Header
+                // Location / Spot Header
                 if (isEditing) {
                     html += '<div class="p-4 sm:p-5 border-b border-white/5 bg-slate-800/80 flex flex-col gap-3">' +
                         '<input id="edit_name_' + loc.id + '" value="' + escapeHtml(loc.name) + '" class="w-full bg-slate-950 border border-white/10 text-white rounded-xl px-3 py-2 text-sm focus:ring-1 focus:ring-indigo-500" />' +
@@ -972,7 +1219,7 @@
                                     '</div>' : '') +
                             '</div>';
 
-                        // Generator for Role-Based Color Coding (Yellow Available vs Green Checked)
+                        // Dynamic Slot Renderer
                         function renderSlots(capacity, bookings, typeStr, icon, highlightColor) {
                             var slotHtml = '<div class="space-y-2.5 sm:space-y-3 mb-4">';
                             for (var c = 0; c < capacity; c++) {
