@@ -84,6 +84,12 @@
         };
 
         // --- Helper Functions ---
+        const generateId = () => {
+            return (typeof crypto !== 'undefined' && crypto.randomUUID) 
+                ? crypto.randomUUID() 
+                : 'id_' + Math.random().toString(36).substr(2, 9);
+        };
+
         const generateNext30Days = () => {
             const dates = [];
             const today = new Date();
@@ -101,13 +107,12 @@
         const formatMonth = (date) => date.toLocaleDateString('en-US', { month: 'short' });
 
         const getShiftCountForDate = (dateKey) => {
-            const dayData = state.assignments[dateKey];
-            if (!dayData) return 0;
+            const dayData = state.assignments[dateKey] || {};
             let count = 0;
             Object.values(dayData).forEach(loc => {
-                Object.values(loc).forEach(shift => {
-                    if (shift.regular) count += Object.keys(shift.regular).length;
-                    if (shift.backup) count += Object.keys(shift.backup).length;
+                Object.values(loc || {}).forEach(shift => {
+                    if (shift && shift.regular) count += Object.keys(shift.regular).length;
+                    if (shift && shift.backup) count += Object.keys(shift.backup).length;
                 });
             });
             return count;
@@ -232,15 +237,21 @@
         state.availableDates = generateNext30Days();
         state.selectedDate = state.availableDates[0];
         
-        // CRITICAL FIX: Load from LocalStorage first so the app loads instantly with saved data
-        const savedLocs = localStorage.getItem('smpw_locations');
-        const savedAssigns = localStorage.getItem('smpw_assignments');
-        if (savedLocs) state.locations = JSON.parse(savedLocs);
-        if (savedAssigns) state.assignments = JSON.parse(savedAssigns);
-        
-        if (savedLocs || savedAssigns) {
-            state.dataLoaded = true;
-            renderApp();
+        // CRITICAL FIX: Safely parse LocalStorage to prevent crashes on corrupted memory
+        try {
+            const savedLocs = localStorage.getItem('smpw_locations');
+            const savedAssigns = localStorage.getItem('smpw_assignments');
+            if (savedLocs) state.locations = JSON.parse(savedLocs);
+            if (savedAssigns) state.assignments = JSON.parse(savedAssigns);
+            
+            if (state.locations && state.locations.length > 0) {
+                state.dataLoaded = true;
+                renderApp();
+            }
+        } catch (e) {
+            console.error("Local storage cleared due to corruption.");
+            localStorage.removeItem('smpw_locations');
+            localStorage.removeItem('smpw_assignments');
         }
 
         // Start pulling live database changes
@@ -248,6 +259,19 @@
         
         // Background polling every 5 seconds for real-time feel
         setInterval(syncWithDatabase, 5000);
+
+        // Absolute Safety Net: Force app to load after 4 seconds even if database hangs
+        setTimeout(() => {
+            if (!state.dataLoaded) {
+                console.warn("Safety net triggered: forcing load.");
+                state.syncError = true;
+                state.dataLoaded = true;
+                if (!state.locations || state.locations.length === 0) {
+                    state.locations = INITIAL_LOCATIONS;
+                }
+                renderApp();
+            }
+        }, 4000);
 
 
         // --- Global Actions (Attached to Window for HTML event handlers) ---
@@ -301,7 +325,9 @@
         window.clearSlot = (dateKey, locId, shiftId, slotType, slotIndex) => {
             if (!state.isAdmin) return;
             const next = JSON.parse(JSON.stringify(state.assignments));
-            if (next[dateKey]?.[locId]?.[shiftId]?.[slotType]) {
+            
+            // Safe traversal to prevent errors
+            if (next[dateKey] && next[dateKey][locId] && next[dateKey][locId][shiftId] && next[dateKey][locId][shiftId][slotType]) {
                 delete next[dateKey][locId][shiftId][slotType][slotIndex];
                 updateAssignments(next);
             }
@@ -315,7 +341,7 @@
             const phone = document.getElementById('new_loc_phone').value.trim();
             if (!name) return;
 
-            const newLoc = { id: crypto.randomUUID(), name, mapUrl, phone, shifts: [] };
+            const newLoc = { id: generateId(), name, mapUrl, phone, shifts: [] };
             updateLocations([...state.locations, newLoc]);
         };
 
@@ -351,7 +377,7 @@
                 if (loc.id === locId) {
                     return {
                         ...loc,
-                        shifts: [...(loc.shifts || []), { id: crypto.randomUUID(), label, slotsCount: 2, backupCount: 1 }]
+                        shifts: [...(loc.shifts || []), { id: generateId(), label, slotsCount: 2, backupCount: 1 }]
                     };
                 }
                 return loc;
@@ -479,6 +505,11 @@
                             ${state.locations.map(location => {
                                 const isEditingLoc = state.isAdmin && state.editingLocationId === location.id;
                                 
+                                // CRITICAL FIX: Safe object traversal without using modern ?. syntax 
+                                // This ensures the app never crashes on older iPhones/browsers.
+                                const dayAsgn = state.assignments[activeDateKey] || {};
+                                const locAsgn = dayAsgn[location.id] || {};
+
                                 // Generate Location HTML
                                 let locHtml = `
                                     <div class="bg-slate-900/60 backdrop-blur-md border border-white/10 rounded-2xl sm:rounded-3xl overflow-hidden flex flex-col shadow-xl">
@@ -543,6 +574,12 @@
                                     locHtml += `<p class="text-slate-500 text-xs sm:text-sm italic py-4 text-center border border-dashed border-slate-700 rounded-xl">No shifts active.</p>`;
                                 } else {
                                     location.shifts.forEach(shift => {
+                                        
+                                        // Safe assignment variables
+                                        const shiftAsgn = locAsgn[shift.id] || {};
+                                        const regAsgn = shiftAsgn.regular || {};
+                                        const bakAsgn = shiftAsgn.backup || {};
+
                                         locHtml += `<div class="bg-slate-950/40 border border-white/5 rounded-xl sm:rounded-2xl p-3 sm:p-5 shadow-inner">`;
                                         
                                         // Shift Header & Admin
@@ -575,7 +612,7 @@
                                         if (shift.slotsCount > 0) {
                                             locHtml += `<div class="space-y-2 sm:space-y-3 mb-4 sm:mb-5">`;
                                             for(let i=0; i<shift.slotsCount; i++) {
-                                                const assignedName = state.assignments[activeDateKey]?.[location.id]?.[shift.id]?.regular?.[i];
+                                                const assignedName = regAsgn[i];
                                                 if (assignedName) {
                                                     locHtml += `
                                                         <div class="flex items-center justify-between bg-indigo-500/10 border border-indigo-500/20 rounded-xl px-3 sm:px-4 py-2.5 sm:py-3 fade-in">
@@ -625,7 +662,7 @@
                                                     <div class="space-y-2 sm:space-y-3 pt-1 sm:pt-2">
                                             `;
                                             for(let i=0; i<shift.backupCount; i++) {
-                                                const assignedBackup = state.assignments[activeDateKey]?.[location.id]?.[shift.id]?.backup?.[i];
+                                                const assignedBackup = bakAsgn[i];
                                                 if (assignedBackup) {
                                                     locHtml += `
                                                         <div class="flex items-center justify-between bg-amber-500/10 border border-amber-500/20 rounded-xl px-3 sm:px-4 py-2.5 sm:py-3 fade-in">
